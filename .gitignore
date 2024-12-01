@@ -141,3 +141,7 @@ test_out.md
 # generated test data
 tests/audio/chords/
 notebooks/*
+*.wav
+*.mp3
+tests/audio/loudness/*.wav
+tests/regression/transforms/*.wav

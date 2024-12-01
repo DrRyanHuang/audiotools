@@ -1,3 +1,4 @@
+import collections
 import csv
 import glob
 import math
@@ -8,20 +9,31 @@ import typing
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from typing import Callable
 from typing import Dict
+from typing import Iterable
 from typing import List
+from typing import NamedTuple
+from typing import Optional
+from typing import Tuple
+from typing import Type
+from typing import Union
 
+import librosa
 import numpy as np
-import torch
-import torchaudio
+import paddle
+import soundfile
 from flatten_dict import flatten
 from flatten_dict import unflatten
+
+from .audio_signal import AudioSignal
+
+# from ..data.preprocess import create_csv
 
 
 @dataclass
 class Info:
-    """Shim for torchaudio.info API changes."""
-
     sample_rate: float
     num_frames: int
 
@@ -31,39 +43,30 @@ class Info:
 
 
 def info(audio_path: str):
-    """Shim for torchaudio.info to make 0.7.2 API match 0.8.0.
+    """✅
 
     Parameters
     ----------
     audio_path : str
         Path to audio file.
     """
-    # try default backend first, then fallback to soundfile
-    try:
-        info = torchaudio.info(str(audio_path))
-    except:  # pragma: no cover
-        info = torchaudio.backend.soundfile_backend.info(str(audio_path))
-
-    if isinstance(info, tuple):  # pragma: no cover
-        signal_info = info[0]
-        info = Info(sample_rate=signal_info.rate, num_frames=signal_info.length)
-    else:
-        info = Info(sample_rate=info.sample_rate, num_frames=info.num_frames)
+    info = soundfile.info(str(audio_path))
+    info = Info(sample_rate=info.samplerate, num_frames=info.frames)
 
     return info
 
 
 def ensure_tensor(
-    x: typing.Union[np.ndarray, torch.Tensor, float, int],
+    x: typing.Union[np.ndarray, paddle.Tensor, float, int],
     ndim: int = None,
     batch_size: int = None,
 ):
-    """Ensures that the input ``x`` is a tensor of specified
+    """✅Ensures that the input ``x`` is a tensor of specified
     dimensions and batch size.
 
     Parameters
     ----------
-    x : typing.Union[np.ndarray, torch.Tensor, float, int]
+    x : typing.Union[np.ndarray, paddle.Tensor, float, int]
         Data that will become a tensor on its way out.
     ndim : int, optional
         How many dimensions should be in the output, by default None
@@ -72,11 +75,11 @@ def ensure_tensor(
 
     Returns
     -------
-    torch.Tensor
+    paddle.Tensor
         Modified version of ``x`` as a tensor.
     """
-    if not torch.is_tensor(x):
-        x = torch.as_tensor(x)
+    if not paddle.is_tensor(x):
+        x = paddle.to_tensor(x)
     if ndim is not None:
         assert x.ndim <= ndim
         while x.ndim < ndim:
@@ -85,11 +88,12 @@ def ensure_tensor(
         if x.shape[0] != batch_size:
             shape = list(x.shape)
             shape[0] = batch_size
-            x = x.expand(*shape)
+            x = paddle.expand(x, shape)
     return x
 
 
 def _get_value(other):
+    # ✅
     from . import AudioSignal
 
     if isinstance(other, AudioSignal):
@@ -97,37 +101,8 @@ def _get_value(other):
     return other
 
 
-def hz_to_bin(hz: torch.Tensor, n_fft: int, sample_rate: int):
-    """Closest frequency bin given a frequency, number
-    of bins, and a sampling rate.
-
-    Parameters
-    ----------
-    hz : torch.Tensor
-       Tensor of frequencies in Hz.
-    n_fft : int
-        Number of FFT bins.
-    sample_rate : int
-        Sample rate of audio.
-
-    Returns
-    -------
-    torch.Tensor
-        Closest bins to the data.
-    """
-    shape = hz.shape
-    hz = hz.flatten()
-    freqs = torch.linspace(0, sample_rate / 2, 2 + n_fft // 2)
-    hz[hz > sample_rate / 2] = sample_rate / 2
-
-    closest = (hz[None, :] - freqs[:, None]).abs()
-    closest_bins = closest.min(dim=0).indices
-
-    return closest_bins.reshape(*shape)
-
-
 def random_state(seed: typing.Union[int, np.random.RandomState]):
-    """
+    """✅
     Turn seed into a np.random.RandomState instance.
 
     Parameters
@@ -160,37 +135,25 @@ def random_state(seed: typing.Union[int, np.random.RandomState]):
         )
 
 
-def seed(random_seed, set_cudnn=False):
-    """
+def seed(random_seed, **kwargs):
+    """✅
     Seeds all random states with the same random seed
-    for reproducibility. Seeds ``numpy``, ``random`` and ``torch``
+    for reproducibility. Seeds ``numpy``, ``random`` and ``paddle``
     random generators.
-    For full reproducibility, two further options must be set
-    according to the torch documentation:
-    https://pytorch.org/docs/stable/notes/randomness.html
-    To do this, ``set_cudnn`` must be True. It defaults to
-    False, since setting it to True results in a performance
-    hit.
 
     Args:
         random_seed (int): integer corresponding to random seed to
         use.
-        set_cudnn (bool): Whether or not to set cudnn into determinstic
-        mode and off of benchmark mode. Defaults to False.
     """
 
-    torch.manual_seed(random_seed)
+    paddle.seed(random_seed)
     np.random.seed(random_seed)
     random.seed(random_seed)
-
-    if set_cudnn:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
 
 
 @contextmanager
 def _close_temp_files(tmpfiles: list):
-    """Utility function for creating a context and closing all temporary files
+    """✅Utility function for creating a context and closing all temporary files
     once the context is exited. For correct functionality, all temporary file
     handles created inside the context must be appended to the ```tmpfiles```
     list.
@@ -223,7 +186,7 @@ AUDIO_EXTENSIONS = [".wav", ".flac", ".mp3", ".mp4"]
 
 
 def find_audio(folder: str, ext: List[str] = AUDIO_EXTENSIONS):
-    """Finds all audio files in a directory recursively.
+    """✅Finds all audio files in a directory recursively.
     Returns a list.
 
     Parameters
@@ -257,7 +220,7 @@ def read_sources(
     relative_path: str = "",
     ext: List[str] = AUDIO_EXTENSIONS,
 ):
-    """Reads audio sources that can either be folders
+    """✅Reads audio sources that can either be folders
     full of audio files, or CSV files that contain paths
     to audio files. CSV files that adhere to the expected
     format can be generated by
@@ -302,7 +265,7 @@ def read_sources(
 def choose_from_list_of_lists(
     state: np.random.RandomState, list_of_lists: list, p: float = None
 ):
-    """Choose a single item from a list of lists.
+    """✅Choose a single item from a list of lists.
 
     Parameters
     ----------
@@ -325,7 +288,7 @@ def choose_from_list_of_lists(
 
 @contextmanager
 def chdir(newdir: typing.Union[Path, str]):
-    """
+    """✅
     Context manager for switching directories to run a
     function. Useful for when you want to use relative
     paths to different runs.
@@ -343,14 +306,14 @@ def chdir(newdir: typing.Union[Path, str]):
         os.chdir(curdir)
 
 
-def prepare_batch(batch: typing.Union[dict, list, torch.Tensor], device: str = "cpu"):
-    """Moves items in a batch (typically generated by a DataLoader as a list
+def prepare_batch(batch: typing.Union[dict, list, paddle.Tensor], device: str = "cpu"):
+    """✅Moves items in a batch (typically generated by a DataLoader as a list
     or a dict) to the specified device. This works even if dictionaries
     are nested.
 
     Parameters
     ----------
-    batch : typing.Union[dict, list, torch.Tensor]
+    batch : typing.Union[dict, list, paddle.Tensor]
         Batch, typically generated by a dataloader, that will be moved to
         the device.
     device : str, optional
@@ -358,9 +321,10 @@ def prepare_batch(batch: typing.Union[dict, list, torch.Tensor], device: str = "
 
     Returns
     -------
-    typing.Union[dict, list, torch.Tensor]
+    typing.Union[dict, list, paddle.Tensor]
         Batch with all values moved to the specified device.
     """
+    device = device.replace("cuda", "gpu")
     if isinstance(batch, dict):
         batch = flatten(batch)
         for key, val in batch.items():
@@ -369,7 +333,7 @@ def prepare_batch(batch: typing.Union[dict, list, torch.Tensor], device: str = "
             except:
                 pass
         batch = unflatten(batch)
-    elif torch.is_tensor(batch):
+    elif paddle.is_tensor(batch):
         batch = batch.to(device)
     elif isinstance(batch, list):
         for i in range(len(batch)):
@@ -381,7 +345,7 @@ def prepare_batch(batch: typing.Union[dict, list, torch.Tensor], device: str = "
 
 
 def sample_from_dist(dist_tuple: tuple, state: np.random.RandomState = None):
-    """Samples from a distribution defined by a tuple. The first
+    """✅Samples from a distribution defined by a tuple. The first
     item in the tuple is the distribution type, and the rest of the
     items are arguments to that distribution. The distribution function
     is gotten from the ``np.random.RandomState`` object.
@@ -423,62 +387,6 @@ def sample_from_dist(dist_tuple: tuple, state: np.random.RandomState = None):
     return dist_fn(*dist_tuple[1:])
 
 
-def collate(list_of_dicts: list, n_splits: int = None):
-    """Collates a list of dictionaries (e.g. as returned by a
-    dataloader) into a dictionary with batched values. This routine
-    uses the default torch collate function for everything
-    except AudioSignal objects, which are handled by the
-    :py:func:`audiotools.core.audio_signal.AudioSignal.batch`
-    function.
-
-    This function takes n_splits to enable splitting a batch
-    into multiple sub-batches for the purposes of gradient accumulation,
-    etc.
-
-    Parameters
-    ----------
-    list_of_dicts : list
-        List of dictionaries to be collated.
-    n_splits : int
-        Number of splits to make when creating the batches (split into
-        sub-batches). Useful for things like gradient accumulation.
-
-    Returns
-    -------
-    dict
-        Dictionary containing batched data.
-    """
-
-    from . import AudioSignal
-
-    batches = []
-    list_len = len(list_of_dicts)
-
-    return_list = False if n_splits is None else True
-    n_splits = 1 if n_splits is None else n_splits
-    n_items = int(math.ceil(list_len / n_splits))
-
-    for i in range(0, list_len, n_items):
-        # Flatten the dictionaries to avoid recursion.
-        list_of_dicts_ = [flatten(d) for d in list_of_dicts[i : i + n_items]]
-        dict_of_lists = {
-            k: [dic[k] for dic in list_of_dicts_] for k in list_of_dicts_[0]
-        }
-
-        batch = {}
-        for k, v in dict_of_lists.items():
-            if isinstance(v, list):
-                if all(isinstance(s, AudioSignal) for s in v):
-                    batch[k] = AudioSignal.batch(v, pad_signals=True)
-                else:
-                    # Borrow the default collate fn from torch.
-                    batch[k] = torch.utils.data._utils.collate.default_collate(v)
-        batches.append(unflatten(batch))
-
-    batches = batches[0] if not return_list else batches
-    return batches
-
-
 BASE_SIZE = 864
 DEFAULT_FIG_SIZE = (9, 3)
 
@@ -491,7 +399,7 @@ def format_figure(
     format: bool = True,
     font_color: str = "white",
 ):
-    """Prettifies the spectrogram and waveform plots. A title
+    """✅Prettifies the spectrogram and waveform plots. A title
     can be inset into the top right corner, and the axes can be
     inset into the figure, allowing the data to take up the entire
     image. Used in
@@ -588,6 +496,226 @@ def format_figure(
             color="white",
         )
         t.set_bbox(dict(facecolor="black", alpha=0.5, edgecolor="black"))
+
+
+_default_collate_err_msg_format = (
+    "default_collate: batch must contain tensors, numpy arrays, numbers, "
+    "dicts or lists; found {}"
+)
+
+
+def collate_tensor_fn(
+    batch,
+    *,
+    collate_fn_map: Optional[Dict[Union[type, Tuple[type, ...]], Callable]] = None,
+):
+    out = paddle.stack(batch, axis=0)
+    return out
+
+
+def collate_float_fn(
+    batch,
+    *,
+    collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]], Callable]] = None,
+):
+    return paddle.to_tensor(batch, dtype=paddle.float64)
+
+
+def collate_int_fn(
+    batch,
+    *,
+    collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]], Callable]] = None,
+):
+    return paddle.to_tensor(batch)
+
+
+def collate_str_fn(
+    batch,
+    *,
+    collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]], Callable]] = None,
+):
+    return batch
+
+
+default_collate_fn_map: Dict[Union[Type, Tuple[Type, ...]], Callable] = {
+    paddle.Tensor: collate_tensor_fn
+}
+default_collate_fn_map[float] = collate_float_fn
+default_collate_fn_map[int] = collate_int_fn
+default_collate_fn_map[str] = collate_str_fn
+default_collate_fn_map[bytes] = collate_str_fn
+
+
+def default_collate(
+    batch,
+    *,
+    collate_fn_map: Optional[Dict[Union[Type, Tuple[Type, ...]], Callable]] = None,
+):
+    r"""
+    General collate function that handles collection type of element within each batch.
+
+    The function also opens function registry to deal with specific element types. `default_collate_fn_map`
+    provides default collate functions for tensors, numpy arrays, numbers and strings.
+
+    Args:
+        batch: a single batch to be collated
+        collate_fn_map: Optional dictionary mapping from element type to the corresponding collate function.
+            If the element type isn't present in this dictionary,
+            this function will go through each key of the dictionary in the insertion order to
+            invoke the corresponding collate function if the element type is a subclass of the key.
+    Note:
+        Each collate function requires a positional argument for batch and a keyword argument
+        for the dictionary of collate functions as `collate_fn_map`.
+    """
+    elem = batch[0]
+    elem_type = type(elem)
+
+    if collate_fn_map is not None:
+        if elem_type in collate_fn_map:
+            return collate_fn_map[elem_type](batch, collate_fn_map=collate_fn_map)
+
+        for collate_type in collate_fn_map:
+            if isinstance(elem, collate_type):
+                return collate_fn_map[collate_type](
+                    batch, collate_fn_map=collate_fn_map
+                )
+
+    if isinstance(elem, collections.abc.Mapping):
+        try:
+            return elem_type(
+                {
+                    key: default_collate(
+                        [d[key] for d in batch], collate_fn_map=collate_fn_map
+                    )
+                    for key in elem
+                }
+            )
+        except TypeError:
+            # The mapping type may not support `__init__(iterable)`.
+            return {
+                key: default_collate(
+                    [d[key] for d in batch], collate_fn_map=collate_fn_map
+                )
+                for key in elem
+            }
+    elif isinstance(elem, tuple) and hasattr(elem, "_fields"):  # namedtuple
+        return elem_type(
+            *(
+                default_collate(samples, collate_fn_map=collate_fn_map)
+                for samples in zip(*batch)
+            )
+        )
+    elif isinstance(elem, collections.abc.Sequence):
+        # check to make sure that the elements in batch have consistent size
+        it = iter(batch)
+        elem_size = len(next(it))
+        if not all(len(elem) == elem_size for elem in it):
+            raise RuntimeError("each element in list of batch should be of equal size")
+        transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
+
+        if isinstance(elem, tuple):
+            return [
+                default_collate(samples, collate_fn_map=collate_fn_map)
+                for samples in transposed
+            ]  # Backwards compatibility.
+        else:
+            try:
+                return elem_type(
+                    [
+                        default_collate(samples, collate_fn_map=collate_fn_map)
+                        for samples in transposed
+                    ]
+                )
+            except TypeError:
+                # The sequence type may not support `__init__(iterable)` (e.g., `range`).
+                return [
+                    default_collate(samples, collate_fn_map=collate_fn_map)
+                    for samples in transposed
+                ]
+
+    raise TypeError(_default_collate_err_msg_format.format(elem_type))
+
+
+def collate(list_of_dicts: list, n_splits: int = None):
+    """Collates a list of dictionaries (e.g. as returned by a
+    dataloader) into a dictionary with batched values. This routine
+    uses the default torch collate function for everything
+    except AudioSignal objects, which are handled by the
+    :py:func:`audiotools.core.audio_signal.AudioSignal.batch`
+    function.
+
+    This function takes n_splits to enable splitting a batch
+    into multiple sub-batches for the purposes of gradient accumulation,
+    etc.
+
+    Parameters
+    ----------
+    list_of_dicts : list
+        List of dictionaries to be collated.
+    n_splits : int
+        Number of splits to make when creating the batches (split into
+        sub-batches). Useful for things like gradient accumulation.
+
+    Returns
+    -------
+    dict
+        Dictionary containing batched data.
+    """
+
+    batches = []
+    list_len = len(list_of_dicts)
+
+    return_list = False if n_splits is None else True
+    n_splits = 1 if n_splits is None else n_splits
+    n_items = int(math.ceil(list_len / n_splits))
+
+    for i in range(0, list_len, n_items):
+        # Flatten the dictionaries to avoid recursion.
+        list_of_dicts_ = [flatten(d) for d in list_of_dicts[i : i + n_items]]
+        dict_of_lists = {
+            k: [dic[k] for dic in list_of_dicts_] for k in list_of_dicts_[0]
+        }
+
+        batch = {}
+        for k, v in dict_of_lists.items():
+            if isinstance(v, list):
+                if all(isinstance(s, AudioSignal) for s in v):
+                    batch[k] = AudioSignal.batch(v, pad_signals=True)
+                else:
+                    batch[k] = default_collate(v, collate_fn_map=default_collate_fn_map)
+        batches.append(unflatten(batch))
+
+    batches = batches[0] if not return_list else batches
+    return batches
+
+
+def hz_to_bin(hz: paddle.Tensor, n_fft: int, sample_rate: int):
+    """Closest frequency bin given a frequency, number
+    of bins, and a sampling rate.
+
+    Parameters
+    ----------
+    hz : paddle.Tensor
+       Tensor of frequencies in Hz.
+    n_fft : int
+        Number of FFT bins.
+    sample_rate : int
+        Sample rate of audio.
+
+    Returns
+    -------
+    paddle.Tensor
+        Closest bins to the data.
+    """
+    shape = hz.shape
+    hz = hz.reshape([-1])
+    freqs = paddle.linspace(0, sample_rate / 2, 2 + n_fft // 2)
+    hz = paddle.clip(hz, max=sample_rate / 2)
+
+    closest = (hz[None, :] - freqs[:, None]).abs()
+    closest_bins = closest.argmin(axis=0)
+
+    return closest_bins.reshape(shape)
 
 
 def generate_chord_dataset(

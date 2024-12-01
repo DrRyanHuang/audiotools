@@ -1,5 +1,10 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
 import tempfile
 from pathlib import Path
+
+import paddle
 
 from audiotools.core.util import find_audio
 from audiotools.core.util import read_sources

@@ -4,7 +4,7 @@ from inspect import signature
 from typing import List
 
 import numpy as np
-import torch
+import paddle
 from flatten_dict import flatten
 from flatten_dict import unflatten
 from numpy.random import RandomState
@@ -14,12 +14,9 @@ from ..core import AudioSignal
 from ..core import util
 from .datasets import AudioLoader
 
-tt = torch.tensor
-"""Shorthand for converting things to torch.tensor."""
-
 
 class BaseTransform:
-    """This is the base class for all transforms that are implemented
+    """✅This is the base class for all transforms that are implemented
     in this library. Transforms have two main operations: ``transform``
     and ``instantiate``.
 
@@ -112,14 +109,14 @@ class BaseTransform:
         return {}
 
     @staticmethod
-    def apply_mask(batch: dict, mask: torch.Tensor):
+    def apply_mask(batch: dict, mask: paddle.Tensor):
         """Applies a mask to the batch.
 
         Parameters
         ----------
         batch : dict
             Batch whose values will be masked in the ``transform`` pass.
-        mask : torch.Tensor
+        mask : paddle.Tensor
             Mask to apply to batch.
 
         Returns
@@ -127,7 +124,17 @@ class BaseTransform:
         dict
             A dictionary that contains values only where ``mask = True``.
         """
-        masked_batch = {k: v[mask] for k, v in flatten(batch).items()}
+        # masked_batch = {k: v[mask] for k, v in flatten(batch).items()}
+        masked_batch = {}
+        for k, v in flatten(batch).items():
+            # `v` may be `Tensor` or `AudioSignal`
+            if 0 == len(v.shape) and 0 == mask.dim():
+                if mask:  # 0d 的 True
+                    masked_batch[k] = v[None]
+                else:
+                    masked_batch[k] = paddle.to_tensor([], dtype=v.dtype)
+            else:
+                masked_batch[k] = v[mask]
         return unflatten(masked_batch)
 
     def transform(self, signal: AudioSignal, **kwargs):
@@ -158,7 +165,7 @@ class BaseTransform:
         tfm_kwargs = self._prepare(kwargs)
         mask = tfm_kwargs["mask"]
 
-        if torch.any(mask):
+        if paddle.any(mask):
             tfm_kwargs = self.apply_mask(tfm_kwargs, mask)
             tfm_kwargs = {k: v for k, v in tfm_kwargs.items() if k != "mask"}
             signal[mask] = self._transform(signal[mask], **tfm_kwargs)
@@ -211,12 +218,12 @@ class BaseTransform:
         params = self._instantiate(state, **kwargs)
         for k in list(params.keys()):
             v = params[k]
-            if isinstance(v, (AudioSignal, torch.Tensor, dict)):
+            if isinstance(v, (AudioSignal, paddle.Tensor, dict)):
                 params[k] = v
             else:
-                params[k] = tt(v)
+                params[k] = paddle.to_tensor(v)
         mask = state.rand() <= self.prob
-        params[f"mask"] = tt(mask)
+        params[f"mask"] = paddle.to_tensor(mask)
 
         # Put the params into a nested dictionary that will be
         # used later when calling the transform. This is to avoid
@@ -266,13 +273,13 @@ class BaseTransform:
 
 
 class Identity(BaseTransform):
-    """This transform just returns the original signal."""
+    """✅This transform just returns the original signal."""
 
     pass
 
 
 class SpectralTransform(BaseTransform):
-    """Spectral transforms require STFT data to exist, since manipulations
+    """✅Spectral transforms require STFT data to exist, since manipulations
     of the STFT require the spectrogram. This just calls ``stft`` before
     the transform is called, and calls ``istft`` after the transform is
     called so that the audio data is written to after the spectral
@@ -287,7 +294,7 @@ class SpectralTransform(BaseTransform):
 
 
 class Compose(BaseTransform):
-    """Compose applies transforms in sequence, one after the other. The
+    """✅Compose applies transforms in sequence, one after the other. The
     transforms are passed in as positional arguments or as a list like so:
 
     >>> transform = tfm.Compose(
@@ -425,7 +432,7 @@ class Compose(BaseTransform):
 
 
 class Choose(Compose):
-    """Choose logic is the same as :py:func:`audiotools.data.transforms.Compose`,
+    """✅Choose logic is the same as :py:func:`audiotools.data.transforms.Compose`,
     but instead of applying all the transforms in sequence, it applies just a single transform,
     which is chosen for each item in the batch.
 
@@ -469,14 +476,14 @@ class Choose(Compose):
         for i, t in enumerate(self.transforms):
             mask = kwargs[t.name]["mask"]
             if mask.item():
-                kwargs[t.name]["mask"] = tt(i == tfm_idx)
+                kwargs[t.name]["mask"] = paddle.to_tensor(i == tfm_idx)
             one_hot.append(kwargs[t.name]["mask"])
         kwargs["one_hot"] = one_hot
         return kwargs
 
 
 class Repeat(Compose):
-    """Repeatedly applies a given transform ``n_repeat`` times."
+    """✅Repeatedly applies a given transform ``n_repeat`` times."
 
     Parameters
     ----------
@@ -500,7 +507,7 @@ class Repeat(Compose):
 
 
 class RepeatUpTo(Choose):
-    """Repeatedly applies a given transform up to ``max_repeat`` times."
+    """✅Repeatedly applies a given transform up to ``max_repeat`` times."
 
     Parameters
     ----------
@@ -529,7 +536,7 @@ class RepeatUpTo(Choose):
 
 
 class ClippingDistortion(BaseTransform):
-    """Adds clipping distortion to signal. Corresponds
+    """✅Adds clipping distortion to signal. Corresponds
     to :py:func:`audiotools.core.effects.EffectMixin.clip_distortion`.
 
     Parameters
@@ -600,108 +607,108 @@ class Equalizer(BaseTransform):
         return signal.equalizer(eq)
 
 
-class Quantization(BaseTransform):
-    """Applies quantization to the input waveform. Corresponds
-    to :py:func:`audiotools.core.effects.EffectMixin.quantization`.
+# class Quantization(BaseTransform):
+#     """❌Applies quantization to the input waveform. Corresponds
+#     to :py:func:`audiotools.core.effects.EffectMixin.quantization`.
 
-    Parameters
-    ----------
-    channels : tuple, optional
-        Number of evenly spaced quantization channels to quantize
-        to, by default ("choice", [8, 32, 128, 256, 1024])
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     channels : tuple, optional
+#         Number of evenly spaced quantization channels to quantize
+#         to, by default ("choice", [8, 32, 128, 256, 1024])
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        channels: tuple = ("choice", [8, 32, 128, 256, 1024]),
-        name: str = None,
-        prob: float = 1.0,
-    ):
-        super().__init__(name=name, prob=prob)
+#     def __init__(
+#         self,
+#         channels: tuple = ("choice", [8, 32, 128, 256, 1024]),
+#         name: str = None,
+#         prob: float = 1.0,
+#     ):
+#         super().__init__(name=name, prob=prob)
 
-        self.channels = channels
+#         self.channels = channels
 
-    def _instantiate(self, state: RandomState):
-        return {"channels": util.sample_from_dist(self.channels, state)}
+#     def _instantiate(self, state: RandomState):
+#         return {"channels": util.sample_from_dist(self.channels, state)}
 
-    def _transform(self, signal, channels):
-        return signal.quantization(channels)
-
-
-class MuLawQuantization(BaseTransform):
-    """Applies mu-law quantization to the input waveform. Corresponds
-    to :py:func:`audiotools.core.effects.EffectMixin.mulaw_quantization`.
-
-    Parameters
-    ----------
-    channels : tuple, optional
-        Number of mu-law spaced quantization channels to quantize
-        to, by default ("choice", [8, 32, 128, 256, 1024])
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
-
-    def __init__(
-        self,
-        channels: tuple = ("choice", [8, 32, 128, 256, 1024]),
-        name: str = None,
-        prob: float = 1.0,
-    ):
-        super().__init__(name=name, prob=prob)
-
-        self.channels = channels
-
-    def _instantiate(self, state: RandomState):
-        return {"channels": util.sample_from_dist(self.channels, state)}
-
-    def _transform(self, signal, channels):
-        return signal.mulaw_quantization(channels)
+#     def _transform(self, signal, channels):
+#         return signal.quantization(channels)
 
 
-class NoiseFloor(BaseTransform):
-    """Adds a noise floor of Gaussian noise to the signal at a specified
-    dB.
+# class MuLawQuantization(BaseTransform):
+#     """Applies mu-law quantization to the input waveform. Corresponds
+#     to :py:func:`audiotools.core.effects.EffectMixin.mulaw_quantization`.
 
-    Parameters
-    ----------
-    db : tuple, optional
-        Level of noise to add to signal, by default ("const", -50.0)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     channels : tuple, optional
+#         Number of mu-law spaced quantization channels to quantize
+#         to, by default ("choice", [8, 32, 128, 256, 1024])
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        db: tuple = ("const", -50.0),
-        name: str = None,
-        prob: float = 1.0,
-    ):
-        super().__init__(name=name, prob=prob)
+#     def __init__(
+#         self,
+#         channels: tuple = ("choice", [8, 32, 128, 256, 1024]),
+#         name: str = None,
+#         prob: float = 1.0,
+#     ):
+#         super().__init__(name=name, prob=prob)
 
-        self.db = db
+#         self.channels = channels
 
-    def _instantiate(self, state: RandomState, signal: AudioSignal):
-        db = util.sample_from_dist(self.db, state)
-        audio_data = state.randn(signal.num_channels, signal.signal_length)
-        nz_signal = AudioSignal(audio_data, signal.sample_rate)
-        nz_signal.normalize(db)
-        return {"nz_signal": nz_signal}
+#     def _instantiate(self, state: RandomState):
+#         return {"channels": util.sample_from_dist(self.channels, state)}
 
-    def _transform(self, signal, nz_signal):
-        # Clone bg_signal so that transform can be repeatedly applied
-        # to different signals with the same effect.
-        return signal + nz_signal
+#     def _transform(self, signal, channels):
+#         return signal.mulaw_quantization(channels)
+
+
+# class NoiseFloor(BaseTransform):
+#     """Adds a noise floor of Gaussian noise to the signal at a specified
+#     dB.
+
+#     Parameters
+#     ----------
+#     db : tuple, optional
+#         Level of noise to add to signal, by default ("const", -50.0)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
+
+#     def __init__(
+#         self,
+#         db: tuple = ("const", -50.0),
+#         name: str = None,
+#         prob: float = 1.0,
+#     ):
+#         super().__init__(name=name, prob=prob)
+
+#         self.db = db
+
+#     def _instantiate(self, state: RandomState, signal: AudioSignal):
+#         db = util.sample_from_dist(self.db, state)
+#         audio_data = state.randn(signal.num_channels, signal.signal_length)
+#         nz_signal = AudioSignal(audio_data, signal.sample_rate)
+#         nz_signal.normalize(db)
+#         return {"nz_signal": nz_signal}
+
+#     def _transform(self, signal, nz_signal):
+#         # Clone bg_signal so that transform can be repeatedly applied
+#         # to different signals with the same effect.
+#         return signal + nz_signal
 
 
 class BackgroundNoise(BaseTransform):
@@ -792,66 +799,66 @@ class BackgroundNoise(BaseTransform):
         return signal.mix(bg_signal.clone(), snr, eq)
 
 
-class CrossTalk(BaseTransform):
-    """Adds crosstalk between speakers, whose audio is drawn from a CSV file
-    that was produced via :py:func:`audiotools.data.preprocess.create_csv`.
+# class CrossTalk(BaseTransform):
+#     """Adds crosstalk between speakers, whose audio is drawn from a CSV file
+#     that was produced via :py:func:`audiotools.data.preprocess.create_csv`.
 
-    This transform calls :py:func:`audiotools.core.effects.EffectMixin.mix`
-    under the hood.
+#     This transform calls :py:func:`audiotools.core.effects.EffectMixin.mix`
+#     under the hood.
 
-    Parameters
-    ----------
-    snr : tuple, optional
-        How loud cross-talk speaker is relative to original signal in dB,
-        by default ("uniform", 0.0, 10.0)
-    sources : List[str], optional
-        Sources containing folders, or CSVs with paths to audio files,
-        by default None
-    weights : List[float], optional
-        Weights to sample audio files from each source, by default None
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    loudness_cutoff : float, optional
-        Loudness cutoff when loading from audio files, by default -40
-    """
+#     Parameters
+#     ----------
+#     snr : tuple, optional
+#         How loud cross-talk speaker is relative to original signal in dB,
+#         by default ("uniform", 0.0, 10.0)
+#     sources : List[str], optional
+#         Sources containing folders, or CSVs with paths to audio files,
+#         by default None
+#     weights : List[float], optional
+#         Weights to sample audio files from each source, by default None
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     loudness_cutoff : float, optional
+#         Loudness cutoff when loading from audio files, by default -40
+#     """
 
-    def __init__(
-        self,
-        snr: tuple = ("uniform", 0.0, 10.0),
-        sources: List[str] = None,
-        weights: List[float] = None,
-        name: str = None,
-        prob: float = 1.0,
-        loudness_cutoff: float = -40,
-    ):
-        super().__init__(name=name, prob=prob)
+#     def __init__(
+#         self,
+#         snr: tuple = ("uniform", 0.0, 10.0),
+#         sources: List[str] = None,
+#         weights: List[float] = None,
+#         name: str = None,
+#         prob: float = 1.0,
+#         loudness_cutoff: float = -40,
+#     ):
+#         super().__init__(name=name, prob=prob)
 
-        self.snr = snr
-        self.loader = AudioLoader(sources, weights)
-        self.loudness_cutoff = loudness_cutoff
+#         self.snr = snr
+#         self.loader = AudioLoader(sources, weights)
+#         self.loudness_cutoff = loudness_cutoff
 
-    def _instantiate(self, state: RandomState, signal: AudioSignal):
-        snr = util.sample_from_dist(self.snr, state)
-        crosstalk_signal = self.loader(
-            state,
-            signal.sample_rate,
-            duration=signal.signal_duration,
-            loudness_cutoff=self.loudness_cutoff,
-            num_channels=signal.num_channels,
-        )["signal"]
+#     def _instantiate(self, state: RandomState, signal: AudioSignal):
+#         snr = util.sample_from_dist(self.snr, state)
+#         crosstalk_signal = self.loader(
+#             state,
+#             signal.sample_rate,
+#             duration=signal.signal_duration,
+#             loudness_cutoff=self.loudness_cutoff,
+#             num_channels=signal.num_channels,
+#         )["signal"]
 
-        return {"crosstalk_signal": crosstalk_signal, "snr": snr}
+#         return {"crosstalk_signal": crosstalk_signal, "snr": snr}
 
-    def _transform(self, signal, crosstalk_signal, snr):
-        # Clone bg_signal so that transform can be repeatedly applied
-        # to different signals with the same effect.
-        loudness = signal.loudness()
-        mix = signal.mix(crosstalk_signal.clone(), snr)
-        mix.normalize(loudness)
-        return mix
+#     def _transform(self, signal, crosstalk_signal, snr):
+#         # Clone bg_signal so that transform can be repeatedly applied
+#         # to different signals with the same effect.
+#         loudness = signal.loudness()
+#         mix = signal.mix(crosstalk_signal.clone(), snr)
+#         mix.normalize(loudness)
+#         return mix
 
 
 class RoomImpulseResponse(BaseTransform):
@@ -938,36 +945,36 @@ class RoomImpulseResponse(BaseTransform):
         )
 
 
-class VolumeChange(BaseTransform):
-    """Changes the volume of the input signal.
+# class VolumeChange(BaseTransform):
+#     """Changes the volume of the input signal.
 
-    Uses :py:func:`audiotools.core.effects.EffectMixin.volume_change`.
+#     Uses :py:func:`audiotools.core.effects.EffectMixin.volume_change`.
 
-    Parameters
-    ----------
-    db : tuple, optional
-        Change in volume in decibels, by default ("uniform", -12.0, 0.0)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     db : tuple, optional
+#         Change in volume in decibels, by default ("uniform", -12.0, 0.0)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        db: tuple = ("uniform", -12.0, 0.0),
-        name: str = None,
-        prob: float = 1.0,
-    ):
-        super().__init__(name=name, prob=prob)
-        self.db = db
+#     def __init__(
+#         self,
+#         db: tuple = ("uniform", -12.0, 0.0),
+#         name: str = None,
+#         prob: float = 1.0,
+#     ):
+#         super().__init__(name=name, prob=prob)
+#         self.db = db
 
-    def _instantiate(self, state: RandomState):
-        return {"db": util.sample_from_dist(self.db, state)}
+#     def _instantiate(self, state: RandomState):
+#         return {"db": util.sample_from_dist(self.db, state)}
 
-    def _transform(self, signal, db):
-        return signal.volume_change(db)
+#     def _transform(self, signal, db):
+#         return signal.volume_change(db)
 
 
 class VolumeNorm(BaseTransform):
@@ -1081,7 +1088,7 @@ class Silence(BaseTransform):
     def _transform(self, signal):
         _loudness = signal._loudness
         signal = AudioSignal(
-            torch.zeros_like(signal.audio_data),
+            paddle.zeros_like(signal.audio_data),
             sample_rate=signal.sample_rate,
             stft_params=signal.stft_params,
         )
@@ -1170,112 +1177,112 @@ class HighPass(BaseTransform):
         return signal.high_pass(cutoff, zeros=self.zeros)
 
 
-class RescaleAudio(BaseTransform):
-    """Rescales the audio so it is in between ``-val`` and ``val``
-    only if the original audio exceeds those bounds. Useful if
-    transforms have caused the audio to clip.
+# class RescaleAudio(BaseTransform):
+#     """Rescales the audio so it is in between ``-val`` and ``val``
+#     only if the original audio exceeds those bounds. Useful if
+#     transforms have caused the audio to clip.
 
-    Uses :py:func:`audiotools.core.effects.EffectMixin.ensure_max_of_audio`.
+#     Uses :py:func:`audiotools.core.effects.EffectMixin.ensure_max_of_audio`.
 
-    Parameters
-    ----------
-    val : float, optional
-        Max absolute value of signal, by default 1.0
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     val : float, optional
+#         Max absolute value of signal, by default 1.0
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(self, val: float = 1.0, name: str = None, prob: float = 1):
-        super().__init__(name=name, prob=prob)
+#     def __init__(self, val: float = 1.0, name: str = None, prob: float = 1):
+#         super().__init__(name=name, prob=prob)
 
-        self.val = val
+#         self.val = val
 
-    def _transform(self, signal):
-        return signal.ensure_max_of_audio(self.val)
-
-
-class ShiftPhase(SpectralTransform):
-    """Shifts the phase of the audio.
-
-    Uses :py:func:`audiotools.core.dsp.DSPMixin.shift)phase`.
-
-    Parameters
-    ----------
-    shift : tuple, optional
-        How much to shift phase by, by default ("uniform", -np.pi, np.pi)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
-
-    def __init__(
-        self,
-        shift: tuple = ("uniform", -np.pi, np.pi),
-        name: str = None,
-        prob: float = 1,
-    ):
-        super().__init__(name=name, prob=prob)
-        self.shift = shift
-
-    def _instantiate(self, state: RandomState):
-        return {"shift": util.sample_from_dist(self.shift, state)}
-
-    def _transform(self, signal, shift):
-        return signal.shift_phase(shift)
+#     def _transform(self, signal):
+#         return signal.ensure_max_of_audio(self.val)
 
 
-class InvertPhase(ShiftPhase):
-    """Inverts the phase of the audio.
+# class ShiftPhase(SpectralTransform):
+#     """Shifts the phase of the audio.
 
-    Uses :py:func:`audiotools.core.dsp.DSPMixin.shift_phase`.
+#     Uses :py:func:`audiotools.core.dsp.DSPMixin.shift)phase`.
 
-    Parameters
-    ----------
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     shift : tuple, optional
+#         How much to shift phase by, by default ("uniform", -np.pi, np.pi)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(self, name: str = None, prob: float = 1):
-        super().__init__(shift=("const", np.pi), name=name, prob=prob)
+#     def __init__(
+#         self,
+#         shift: tuple = ("uniform", -np.pi, np.pi),
+#         name: str = None,
+#         prob: float = 1,
+#     ):
+#         super().__init__(name=name, prob=prob)
+#         self.shift = shift
+
+#     def _instantiate(self, state: RandomState):
+#         return {"shift": util.sample_from_dist(self.shift, state)}
+
+#     def _transform(self, signal, shift):
+#         return signal.shift_phase(shift)
 
 
-class CorruptPhase(SpectralTransform):
-    """Corrupts the phase of the audio.
+# class InvertPhase(ShiftPhase):
+#     """Inverts the phase of the audio.
 
-    Uses :py:func:`audiotools.core.dsp.DSPMixin.corrupt_phase`.
+#     Uses :py:func:`audiotools.core.dsp.DSPMixin.shift_phase`.
 
-    Parameters
-    ----------
-    scale : tuple, optional
-        How much to corrupt phase by, by default ("uniform", 0, np.pi)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self, scale: tuple = ("uniform", 0, np.pi), name: str = None, prob: float = 1
-    ):
-        super().__init__(name=name, prob=prob)
-        self.scale = scale
+#     def __init__(self, name: str = None, prob: float = 1):
+#         super().__init__(shift=("const", np.pi), name=name, prob=prob)
 
-    def _instantiate(self, state: RandomState, signal: AudioSignal = None):
-        scale = util.sample_from_dist(self.scale, state)
-        corruption = state.normal(scale=scale, size=signal.phase.shape[1:])
-        return {"corruption": corruption.astype("float32")}
 
-    def _transform(self, signal, corruption):
-        return signal.shift_phase(shift=corruption)
+# class CorruptPhase(SpectralTransform):
+#     """Corrupts the phase of the audio.
+
+#     Uses :py:func:`audiotools.core.dsp.DSPMixin.corrupt_phase`.
+
+#     Parameters
+#     ----------
+#     scale : tuple, optional
+#         How much to corrupt phase by, by default ("uniform", 0, np.pi)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
+
+#     def __init__(
+#         self, scale: tuple = ("uniform", 0, np.pi), name: str = None, prob: float = 1
+#     ):
+#         super().__init__(name=name, prob=prob)
+#         self.scale = scale
+
+#     def _instantiate(self, state: RandomState, signal: AudioSignal = None):
+#         scale = util.sample_from_dist(self.scale, state)
+#         corruption = state.normal(scale=scale, size=signal.phase.shape[1:])
+#         return {"corruption": corruption.astype("float32")}
+
+#     def _transform(self, signal, corruption):
+#         return signal.shift_phase(shift=corruption)
 
 
 class FrequencyMask(SpectralTransform):
@@ -1369,37 +1376,37 @@ class TimeMask(SpectralTransform):
         return signal.mask_timesteps(tmin_s=tmin_s, tmax_s=tmax_s)
 
 
-class MaskLowMagnitudes(SpectralTransform):
-    """Masks low magnitude regions out of signal.
+# class MaskLowMagnitudes(SpectralTransform):
+#     """Masks low magnitude regions out of signal.
 
-    Uses :py:func:`audiotools.core.dsp.DSPMixin.mask_low_magnitudes`.
+#     Uses :py:func:`audiotools.core.dsp.DSPMixin.mask_low_magnitudes`.
 
-    Parameters
-    ----------
-    db_cutoff : tuple, optional
-        Decibel value for which things below it will be masked away,
-        by default ("uniform", -10, 10)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     db_cutoff : tuple, optional
+#         Decibel value for which things below it will be masked away,
+#         by default ("uniform", -10, 10)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        db_cutoff: tuple = ("uniform", -10, 10),
-        name: str = None,
-        prob: float = 1,
-    ):
-        super().__init__(name=name, prob=prob)
-        self.db_cutoff = db_cutoff
+#     def __init__(
+#         self,
+#         db_cutoff: tuple = ("uniform", -10, 10),
+#         name: str = None,
+#         prob: float = 1,
+#     ):
+#         super().__init__(name=name, prob=prob)
+#         self.db_cutoff = db_cutoff
 
-    def _instantiate(self, state: RandomState, signal: AudioSignal = None):
-        return {"db_cutoff": util.sample_from_dist(self.db_cutoff, state)}
+#     def _instantiate(self, state: RandomState, signal: AudioSignal = None):
+#         return {"db_cutoff": util.sample_from_dist(self.db_cutoff, state)}
 
-    def _transform(self, signal, db_cutoff: float):
-        return signal.mask_low_magnitudes(db_cutoff)
+#     def _transform(self, signal, db_cutoff: float):
+#         return signal.mask_low_magnitudes(db_cutoff)
 
 
 class Smoothing(BaseTransform):
@@ -1441,58 +1448,58 @@ class Smoothing(BaseTransform):
         return {"window": AudioSignal(window, signal.sample_rate)}
 
     def _transform(self, signal, window):
-        sscale = signal.audio_data.abs().max(dim=-1, keepdim=True).values
+        sscale = signal.audio_data.abs().max(axis=-1, keepdim=True)
         sscale[sscale == 0.0] = 1.0
 
         out = signal.convolve(window)
 
-        oscale = out.audio_data.abs().max(dim=-1, keepdim=True).values
+        oscale = out.audio_data.abs().max(axis=-1, keepdim=True)
         oscale[oscale == 0.0] = 1.0
 
         out = out * (sscale / oscale)
         return out
 
 
-class TimeNoise(TimeMask):
-    """Similar to :py:func:`audiotools.data.transforms.TimeMask`, but
-    replaces with noise instead of zeros.
+# class TimeNoise(TimeMask):
+#     """Similar to :py:func:`audiotools.data.transforms.TimeMask`, but
+#     replaces with noise instead of zeros.
 
-    Parameters
-    ----------
-    t_center : tuple, optional
-        Center time in terms of 0.0 and 1.0 (duration of signal),
-        by default ("uniform", 0.0, 1.0)
-    t_width : tuple, optional
-        Width of dropped out portion, by default ("const", 0.025)
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     t_center : tuple, optional
+#         Center time in terms of 0.0 and 1.0 (duration of signal),
+#         by default ("uniform", 0.0, 1.0)
+#     t_width : tuple, optional
+#         Width of dropped out portion, by default ("const", 0.025)
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        t_center: tuple = ("uniform", 0.0, 1.0),
-        t_width: tuple = ("const", 0.025),
-        name: str = None,
-        prob: float = 1,
-    ):
-        super().__init__(t_center=t_center, t_width=t_width, name=name, prob=prob)
+#     def __init__(
+#         self,
+#         t_center: tuple = ("uniform", 0.0, 1.0),
+#         t_width: tuple = ("const", 0.025),
+#         name: str = None,
+#         prob: float = 1,
+#     ):
+#         super().__init__(t_center=t_center, t_width=t_width, name=name, prob=prob)
 
-    def _transform(self, signal, tmin_s: float, tmax_s: float):
-        signal = signal.mask_timesteps(tmin_s=tmin_s, tmax_s=tmax_s, val=0.0)
-        mag, phase = signal.magnitude, signal.phase
+#     def _transform(self, signal, tmin_s: float, tmax_s: float):
+#         signal = signal.mask_timesteps(tmin_s=tmin_s, tmax_s=tmax_s, val=0.0)
+#         mag, phase = signal.magnitude, signal.phase
 
-        mag_r, phase_r = torch.randn_like(mag), torch.randn_like(phase)
-        mask = (mag == 0.0) * (phase == 0.0)
+#         mag_r, phase_r = torch.randn_like(mag), torch.randn_like(phase)
+#         mask = (mag == 0.0) * (phase == 0.0)
 
-        mag[mask] = mag_r[mask]
-        phase[mask] = phase_r[mask]
+#         mag[mask] = mag_r[mask]
+#         phase[mask] = phase_r[mask]
 
-        signal.magnitude = mag
-        signal.phase = phase
-        return signal
+#         signal.magnitude = mag
+#         signal.phase = phase
+#         return signal
 
 
 class FrequencyNoise(FrequencyMask):
@@ -1525,68 +1532,72 @@ class FrequencyNoise(FrequencyMask):
         signal = signal.mask_frequencies(fmin_hz=fmin_hz, fmax_hz=fmax_hz)
         mag, phase = signal.magnitude, signal.phase
 
-        mag_r, phase_r = torch.randn_like(mag), torch.randn_like(phase)
+        mag_r, phase_r = paddle.randn(shape=mag.shape, dtype=mag.dtype), paddle.randn(
+            shape=phase.shape, dtype=phase.dtype
+        )
         mask = (mag == 0.0) * (phase == 0.0)
 
-        mag[mask] = mag_r[mask]
-        phase[mask] = phase_r[mask]
+        # mag[mask] = mag_r[mask]
+        # phase[mask] = phase_r[mask]
+        mag = paddle.where(mask, mag_r, mag)
+        phase = paddle.where(mask, phase_r, phase)
 
         signal.magnitude = mag
         signal.phase = phase
         return signal
 
 
-class SpectralDenoising(Equalizer):
-    """Applies denoising algorithm detailed in
-    :py:func:`audiotools.ml.layers.spectral_gate.SpectralGate`,
-    using a randomly generated noise signal for denoising.
+# class SpectralDenoising(Equalizer):
+#     """Applies denoising algorithm detailed in
+#     :py:func:`audiotools.ml.layers.spectral_gate.SpectralGate`,
+#     using a randomly generated noise signal for denoising.
 
-    Parameters
-    ----------
-    eq_amount : tuple, optional
-        Amount of eq to apply to noise signal, by default ("const", 1.0)
-    denoise_amount : tuple, optional
-        Amount to denoise by, by default ("uniform", 0.8, 1.0)
-    nz_volume : float, optional
-        Volume of noise to denoise with, by default -40
-    n_bands : int, optional
-        Number of bands in equalizer, by default 6
-    n_freq : int, optional
-        Number of frequency bins to smooth by, by default 3
-    n_time : int, optional
-        Number of time bins to smooth by, by default 5
-    name : str, optional
-        Name of this transform, used to identify it in the dictionary
-        produced by ``self.instantiate``, by default None
-    prob : float, optional
-        Probability of applying this transform, by default 1.0
-    """
+#     Parameters
+#     ----------
+#     eq_amount : tuple, optional
+#         Amount of eq to apply to noise signal, by default ("const", 1.0)
+#     denoise_amount : tuple, optional
+#         Amount to denoise by, by default ("uniform", 0.8, 1.0)
+#     nz_volume : float, optional
+#         Volume of noise to denoise with, by default -40
+#     n_bands : int, optional
+#         Number of bands in equalizer, by default 6
+#     n_freq : int, optional
+#         Number of frequency bins to smooth by, by default 3
+#     n_time : int, optional
+#         Number of time bins to smooth by, by default 5
+#     name : str, optional
+#         Name of this transform, used to identify it in the dictionary
+#         produced by ``self.instantiate``, by default None
+#     prob : float, optional
+#         Probability of applying this transform, by default 1.0
+#     """
 
-    def __init__(
-        self,
-        eq_amount: tuple = ("const", 1.0),
-        denoise_amount: tuple = ("uniform", 0.8, 1.0),
-        nz_volume: float = -40,
-        n_bands: int = 6,
-        n_freq: int = 3,
-        n_time: int = 5,
-        name: str = None,
-        prob: float = 1,
-    ):
-        super().__init__(eq_amount=eq_amount, n_bands=n_bands, name=name, prob=prob)
+#     def __init__(
+#         self,
+#         eq_amount: tuple = ("const", 1.0),
+#         denoise_amount: tuple = ("uniform", 0.8, 1.0),
+#         nz_volume: float = -40,
+#         n_bands: int = 6,
+#         n_freq: int = 3,
+#         n_time: int = 5,
+#         name: str = None,
+#         prob: float = 1,
+#     ):
+#         super().__init__(eq_amount=eq_amount, n_bands=n_bands, name=name, prob=prob)
 
-        self.nz_volume = nz_volume
-        self.denoise_amount = denoise_amount
-        self.spectral_gate = ml.layers.SpectralGate(n_freq, n_time)
+#         self.nz_volume = nz_volume
+#         self.denoise_amount = denoise_amount
+#         self.spectral_gate = ml.layers.SpectralGate(n_freq, n_time)
 
-    def _transform(self, signal, nz, eq, denoise_amount):
-        nz = nz.normalize(self.nz_volume).equalizer(eq)
-        self.spectral_gate = self.spectral_gate.to(signal.device)
-        signal = self.spectral_gate(signal, nz, denoise_amount)
-        return signal
+#     def _transform(self, signal, nz, eq, denoise_amount):
+#         nz = nz.normalize(self.nz_volume).equalizer(eq)
+#         self.spectral_gate = self.spectral_gate.to(signal.device)
+#         signal = self.spectral_gate(signal, nz, denoise_amount)
+#         return signal
 
-    def _instantiate(self, state: RandomState):
-        kwargs = super()._instantiate(state)
-        kwargs["denoise_amount"] = util.sample_from_dist(self.denoise_amount, state)
-        kwargs["nz"] = AudioSignal(state.randn(22050), 44100)
-        return kwargs
+#     def _instantiate(self, state: RandomState):
+#         kwargs = super()._instantiate(state)
+#         kwargs["denoise_amount"] = util.sample_from_dist(self.denoise_amount, state)
+#         kwargs["nz"] = AudioSignal(state.randn(22050), 44100)
+#         return kwargs

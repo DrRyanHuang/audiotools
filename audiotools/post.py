@@ -5,7 +5,7 @@ from pathlib import Path
 
 import markdown2 as md
 import matplotlib.pyplot as plt
-import torch
+import paddle
 from IPython.display import HTML
 
 
@@ -50,7 +50,7 @@ def audio_table(
     columns = None
 
     def _default_format_fn(label, x, **kwargs):
-        if torch.is_tensor(x):
+        if paddle.is_tensor(x):
             x = x.tolist()
 
         if x is None:

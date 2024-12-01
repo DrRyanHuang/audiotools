@@ -1,7 +1,10 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
+
 import numpy as np
+import paddle
 import pytest
-import torch
-import torchaudio
 
 from audiotools import AudioSignal
 
@@ -23,7 +26,7 @@ def test_normalize():
         assert np.allclose(loudness, db, atol=1e-1)
 
     batch_size = 16
-    db = -60 + torch.linspace(10, 30, batch_size)
+    db = -60 + paddle.linspace(10, 30, batch_size)
 
     array = np.random.randn(batch_size, 2, 32000)
     array = array / np.abs(array).max()
@@ -67,7 +70,7 @@ def test_mix():
     nz = AudioSignal(audio_path, offset=10, duration=10)
 
     batch_size = 4
-    tgt_snr = torch.linspace(-10, 10, batch_size)
+    tgt_snr = paddle.linspace(-10, 10, batch_size)
 
     spk_batch = AudioSignal.batch([spk.deepcopy() for _ in range(batch_size)])
     nz_batch = AudioSignal.batch([nz.deepcopy() for _ in range(batch_size)])
@@ -77,7 +80,7 @@ def test_mix():
     assert np.allclose(snr, tgt_snr, atol=1)
 
     # Test with "EQing" the other signal
-    db = 0 + 0 * torch.rand(10)
+    db = 0 + 0 * paddle.rand([10])
     spk_batch.deepcopy().mix(nz_batch, snr=tgt_snr, other_eq=db)
     snr = spk_batch.loudness() - nz_batch.loudness()
     assert np.allclose(snr, tgt_snr, atol=1)
@@ -134,15 +137,12 @@ def test_pipeline():
     nz = AudioSignal(audio_path, offset=10, duration=5)
 
     batch_size = 16
-    tgt_snr = torch.linspace(20, 30, batch_size)
+    tgt_snr = paddle.linspace(20, 30, batch_size)
 
     (spk @ ir).mix(nz, snr=tgt_snr)
 
 
 def test_codec():
-    torchaudio_version_070 = "0.7" in torchaudio.__version__
-    if torchaudio_version_070:
-        return
     audio_path = "tests/audio/spk/f10_script4_produced.wav"
     spk = AudioSignal(audio_path, offset=10, duration=10)
 
@@ -187,7 +187,7 @@ def test_mel_filterbank(n_bands):
     spk = AudioSignal(audio_path, offset=10, duration=1)
     fbank = spk.deepcopy().mel_filterbank(n_bands)
 
-    assert torch.allclose(fbank.sum(-1), spk.audio_data, atol=1e-6)
+    assert paddle.allclose(fbank.sum(-1), spk.audio_data, atol=1e-6)
 
     # Check if it works in batches.
     spk_batch = AudioSignal.batch(
@@ -198,7 +198,7 @@ def test_mel_filterbank(n_bands):
     )
     fbank = spk_batch.deepcopy().mel_filterbank(n_bands)
     summed = fbank.sum(-1)
-    assert torch.allclose(summed, spk_batch.audio_data, atol=1e-6)
+    assert paddle.allclose(summed, spk_batch.audio_data, atol=1e-6)
 
 
 @pytest.mark.parametrize("n_bands", [1, 2, 4, 8, 12, 16])
@@ -206,7 +206,7 @@ def test_equalizer(n_bands):
     audio_path = "tests/audio/spk/f10_script4_produced.wav"
     spk = AudioSignal(audio_path, offset=10, duration=10)
 
-    db = -3 + 1 * torch.rand(n_bands)
+    db = -3 + 1 * paddle.rand([n_bands])
     spk.deepcopy().equalizer(db)
 
     db = -3 + 1 * np.random.rand(n_bands)
@@ -214,7 +214,7 @@ def test_equalizer(n_bands):
 
     audio_path = "tests/audio/ir/h179_Bar_1txts.wav"
     ir = AudioSignal(audio_path)
-    db = -3 + 1 * torch.rand(n_bands)
+    db = -3 + 1 * paddle.rand([n_bands])
 
     spk.deepcopy().convolve(ir.equalizer(db))
 
@@ -225,7 +225,7 @@ def test_equalizer(n_bands):
         ]
     )
 
-    db = torch.zeros(spk_batch.batch_size, n_bands)
+    db = paddle.zeros([spk_batch.batch_size, n_bands])
     output = spk_batch.deepcopy().equalizer(db)
 
     assert output == spk_batch
@@ -242,7 +242,7 @@ def test_clip_distortion():
             for _ in range(16)
         ]
     )
-    percs = torch.from_numpy(np.random.uniform(size=(16,))).float()
+    percs = paddle.to_tensor(np.random.uniform(size=(16,))).astype("float32")
     clipped_batch = spk_batch.deepcopy().clip_distortion(percs)
 
     assert clipped.audio_data.abs().max() < 1.0
@@ -335,7 +335,7 @@ def test_apply_ir():
 
     spk = AudioSignal(audio_path, offset=10, duration=2)
     ir = AudioSignal(ir_path)
-    db = 0 + 0 * torch.rand(10)
+    db = 0 + 0 * paddle.rand([10])
     output = spk.deepcopy().apply_ir(ir, drr=10, ir_eq=db)
 
     assert np.allclose(ir.measure_drr().flatten(), 10)
@@ -344,7 +344,7 @@ def test_apply_ir():
 
 
 def test_ensure_max_of_audio():
-    spk = AudioSignal(torch.randn(1, 1, 44100), 44100)
+    spk = AudioSignal(paddle.randn([1, 1, 44100]), 44100)
 
     max_vals = [1.0] + [np.random.rand() for _ in range(10)]
     for val in max_vals:
@@ -352,8 +352,8 @@ def test_ensure_max_of_audio():
         assert after.audio_data.abs().max() <= val + 1e-3
 
     # Make sure it does nothing to a tiny signal
-    spk = AudioSignal(torch.rand(1, 1, 44100), 44100)
+    spk = AudioSignal(paddle.rand([1, 1, 44100]), 44100)
     spk.audio_data = spk.audio_data * 0.5
     after = spk.deepcopy().ensure_max_of_audio()
 
-    assert torch.allclose(after.audio_data, spk.audio_data)
+    assert paddle.allclose(after.audio_data, spk.audio_data)

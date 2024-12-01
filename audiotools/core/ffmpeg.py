@@ -7,7 +7,7 @@ from typing import Tuple
 
 import ffmpy
 import numpy as np
-import torch
+import paddle
 
 
 def r128stats(filepath: str, quiet: bool):
@@ -98,7 +98,7 @@ class FFMPEGMixin:
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Loudness of every item in the batch, computed via
             FFMPEG.
         """
@@ -110,102 +110,5 @@ class FFMPEGMixin:
                 loudness_stats = r128stats(f.name, quiet=quiet)
                 loudness.append(loudness_stats["I"])
 
-        self._loudness = torch.from_numpy(np.array(loudness)).float()
+        self._loudness = paddle.to_tensor(np.array(loudness)).astype("float32")
         return self.loudness()
-
-    def ffmpeg_resample(self, sample_rate: int, quiet: bool = True):
-        """Resamples AudioSignal using FFMPEG. More memory-efficient
-        than using julius.resample for long audio files.
-
-        Parameters
-        ----------
-        sample_rate : int
-            Sample rate to resample to.
-        quiet : bool, optional
-            Whether to show FFMPEG output during computation,
-            by default True
-
-        Returns
-        -------
-        AudioSignal
-            Resampled AudioSignal.
-        """
-        from audiotools import AudioSignal
-
-        if sample_rate == self.sample_rate:
-            return self
-
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
-            self.write(f.name)
-            f_out = f.name.replace("wav", "rs.wav")
-            command = f"ffmpeg -i {f.name} -ar {sample_rate} {f_out}"
-            if quiet:
-                command += " -hide_banner -loglevel error"
-            subprocess.check_call(shlex.split(command))
-            resampled = AudioSignal(f_out)
-            Path.unlink(Path(f_out))
-        return resampled
-
-    @classmethod
-    def load_from_file_with_ffmpeg(cls, audio_path: str, quiet: bool = True, **kwargs):
-        """Loads AudioSignal object after decoding it to a wav file using FFMPEG.
-        Useful for loading audio that isn't covered by librosa's loading mechanism. Also
-        useful for loading mp3 files, without any offset.
-
-        Parameters
-        ----------
-        audio_path : str
-            Path to load AudioSignal from.
-        quiet : bool, optional
-            Whether to show FFMPEG output during computation,
-            by default True
-
-        Returns
-        -------
-        AudioSignal
-            AudioSignal loaded from file with FFMPEG.
-        """
-        audio_path = str(audio_path)
-        with tempfile.TemporaryDirectory() as d:
-            wav_file = str(Path(d) / "extracted.wav")
-            padded_wav = str(Path(d) / "padded.wav")
-
-            global_options = "-y"
-            if quiet:
-                global_options += " -loglevel error"
-
-            ff = ffmpy.FFmpeg(
-                inputs={audio_path: None},
-                # For inputs that are m4a (and others?), the input audio can
-                # have samples that don't match the sample rate. This aresample
-                # option forces ffmpeg to read timing information in the source
-                # file instead of assuming constant sample rate.
-                #
-                # This fixes an issue where an input m4a file might be a
-                # different length than the output wav file
-                outputs={wav_file: "-af aresample=async=1000"},
-                global_options=global_options,
-            )
-            ff.run()
-
-            # We pad the file using the start time offset in case it's an audio
-            # stream starting at some offset in a video container.
-            pad, codec = ffprobe_offset_and_codec(audio_path)
-
-            # For mp3s, don't pad files with discrepancies less than 0.027s -
-            # it's likely due to codec latency. The amount of latency introduced
-            # by mp3 is 1152, which is 0.0261 44khz. So we set the threshold
-            # here slightly above that.
-            # Source: https://lame.sourceforge.io/tech-FAQ.txt.
-            if codec == "mp3" and pad < 0.027:
-                pad = 0.0
-            ff = ffmpy.FFmpeg(
-                inputs={wav_file: None},
-                outputs={padded_wav: f"-af 'adelay={pad*1000}:all=true'"},
-                global_options=global_options,
-            )
-            ff.run()
-
-            signal = cls(padded_wav, **kwargs)
-
-        return signal

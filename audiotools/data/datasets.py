@@ -5,8 +5,9 @@ from typing import List
 from typing import Union
 
 import numpy as np
-from torch.utils.data import SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
+import paddle
+from paddle.io import DistributedBatchSampler
+from paddle.io import SequenceSampler
 
 from ..core import AudioSignal
 from ..core import util
@@ -151,7 +152,7 @@ def align_lists(lists, matcher: Callable = default_matcher):
 
 
 class AudioDataset:
-    """Loads audio from multiple loaders (with associated transforms)
+    """✅Loads audio from multiple loaders (with associated transforms)
     for a specified number of samples. Excerpts are drawn randomly
     of the specified duration, above a specified loudness threshold
     and are resampled on the fly to the desired sample rate
@@ -476,6 +477,7 @@ class AudioDataset:
 
 
 class ConcatDataset(AudioDataset):
+    # ✅
     def __init__(self, datasets: list):
         self.datasets = datasets
 
@@ -487,22 +489,72 @@ class ConcatDataset(AudioDataset):
         return dataset[idx // len(self.datasets)]
 
 
-class ResumableDistributedSampler(DistributedSampler):  # pragma: no cover
+# class ResumableDistributedSampler(DistributedSampler):  # pragma: no cover
+#     """Distributed sampler that can be resumed from a given start index."""
+
+#     def __init__(self, dataset, start_idx: int = None, **kwargs):
+#         super().__init__(dataset, **kwargs)
+#         # Start index, allows to resume an experiment at the index it was
+#         self.start_idx = start_idx // self.num_replicas if start_idx is not None else 0
+
+#     def __iter__(self):
+#         for i, idx in enumerate(super().__iter__()):
+#             if i >= self.start_idx:
+#                 yield idx
+#         self.start_idx = 0  # set the index back to 0 so for the next epoch
+
+
+class ResumableDistributedSampler(DistributedBatchSampler):  # pragma: no cover
     """Distributed sampler that can be resumed from a given start index."""
 
-    def __init__(self, dataset, start_idx: int = None, **kwargs):
-        super().__init__(dataset, **kwargs)
+    def __init__(
+        self,
+        dataset,
+        batch_size,
+        start_idx: int = None,
+        num_replicas=None,
+        rank=None,
+        shuffle=False,
+        drop_last=False,
+    ):
+        super().__init__(
+            dataset=dataset,
+            batch_size=batch_size,
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )
         # Start index, allows to resume an experiment at the index it was
-        self.start_idx = start_idx // self.num_replicas if start_idx is not None else 0
+        if start_idx is not None:
+            self.start_idx = start_idx // self.num_replicas
+        else:
+            self.start_idx = 0
+        # 重新计算样本总数，因为 DistributedBatchSampler 的 __len__ 方法是基于 shuffle 后的样本总数计算的
+        self.total_size = len(self.dataset) if not shuffle else len(self.indices)
 
     def __iter__(self):
-        for i, idx in enumerate(super().__iter__()):
-            if i >= self.start_idx:
-                yield idx
+        # 由于 Paddle 的 DistributedBatchSampler 直接返回 batch，我们需要将其展开为单个索引
+        indices_iter = iter(super().__iter__())
+        # 跳过前面的 start_idx 个 batch
+        for _ in range(self.start_idx):
+            next(indices_iter)
+
+        current_idx = 0
+        while True:
+            batch_indices = next(indices_iter, None)
+            if batch_indices is None:
+                break
+            for idx in batch_indices:
+                if (
+                    current_idx >= self.start_idx * self.batch_size
+                ):  # 调整判断条件，确保从 start_idx 开始
+                    yield idx
+                current_idx += 1
         self.start_idx = 0  # set the index back to 0 so for the next epoch
 
 
-class ResumableSequentialSampler(SequentialSampler):  # pragma: no cover
+class ResumableSequentialSampler(SequenceSampler):  # pragma: no cover
     """Sequential sampler that can be resumed from a given start index."""
 
     def __init__(self, dataset, start_idx: int = None, **kwargs):

@@ -1,5 +1,6 @@
 import math
 import string
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,6 +9,7 @@ import gradio as gr
 import numpy as np
 import soundfile as sf
 
+sys.path.append("/home/work/pdaudoio")
 from audiotools import preference as pr
 
 

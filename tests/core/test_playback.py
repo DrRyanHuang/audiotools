@@ -1,3 +1,7 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
+
 import numpy as np
 from numpy.random import sample
 

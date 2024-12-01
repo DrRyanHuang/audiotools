@@ -1,11 +1,13 @@
 import os
 import random
+import sys
 import tempfile
 
 import numpy as np
+import paddle
 import pytest
-import torch
 
+sys.path.append("/home/work/pdaudoio")
 from audiotools import util
 from audiotools.core.audio_signal import AudioSignal
 
@@ -31,22 +33,22 @@ def test_check_random_state():
 
 def test_seed():
     util.seed(0)
-    torch_result_a = torch.randn(1)
+    paddle_result_a = paddle.randn([1])
     np_result_a = np.random.randn(1)
     py_result_a = random.random()
 
     util.seed(0, set_cudnn=True)
-    torch_result_b = torch.randn(1)
+    paddle_result_b = paddle.randn([1])
     np_result_b = np.random.randn(1)
     py_result_b = random.random()
 
-    assert torch_result_a == torch_result_b
+    assert paddle_result_a == paddle_result_b
     assert np_result_a == np_result_b
     assert py_result_a == py_result_b
 
 
 def test_hz_to_bin():
-    hz = torch.from_numpy(np.array([100, 200, 300]))
+    hz = paddle.to_tensor(np.array([100, 200, 300]))
     sr = 1000
     n_fft = 2048
 
@@ -78,13 +80,13 @@ def test_chdir():
 
 
 def test_prepare_batch():
-    batch = {"tensor": torch.randn(1), "non_tensor": np.random.randn(1)}
+    batch = {"tensor": paddle.randn([1]), "non_tensor": np.random.randn(1)}
     util.prepare_batch(batch)
 
-    batch = torch.randn(1)
+    batch = paddle.randn([1])
     util.prepare_batch(batch)
 
-    batch = [torch.randn(1), np.random.randn(1)]
+    batch = [paddle.randn([1]), np.random.randn(1)]
     util.prepare_batch(batch)
 
 
@@ -105,11 +107,11 @@ def test_collate():
 
     def _one_item():
         return {
-            "signal": AudioSignal(torch.randn(1, 1, 44100), 44100),
-            "tensor": torch.randn(1),
+            "signal": AudioSignal(paddle.randn([1, 1, 44100]), 44100),
+            "tensor": paddle.randn([1]),
             "string": "Testing",
             "dict": {
-                "nested_signal": AudioSignal(torch.randn(1, 1, 44100), 44100),
+                "nested_signal": AudioSignal(paddle.randn([1, 1, 44100]), 44100),
             },
         }
 

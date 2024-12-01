@@ -2,7 +2,7 @@ import tempfile
 import timeit
 
 import librosa
-import torch
+import paddle
 import torchaudio
 
 from audiotools import AudioSignal
@@ -17,7 +17,7 @@ class LibrosaSignal(AudioSignal):
             duration=duration,
             sr=None,
         )
-        data = torch.from_numpy(data)
+        data = paddle.to_tensor(data)
         while data.ndim < 3:
             data = data.unsqueeze(0)
 
@@ -75,7 +75,7 @@ def profile_salient_excerpt(filename: str, duration: float, num_tries: int):
 
 # Load 2 second excerpt from a 2 hour file
 with tempfile.NamedTemporaryFile(suffix=".wav") as f:
-    signal = AudioSignal(torch.randn(44100 * 60 * 60), 44100)
+    signal = AudioSignal(paddle.randn([44100 * 60 * 60]), 44100)
     signal.write(f.name)
 
     def func():

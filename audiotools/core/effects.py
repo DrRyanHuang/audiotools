@@ -1,11 +1,12 @@
 import typing
 
-import julius
 import numpy as np
-import torch
-import torchaudio
+import paddle
 
 from . import util
+from ._julius import SplitBands
+
+# from . import _julius
 
 
 class EffectMixin:
@@ -27,8 +28,8 @@ class EffectMixin:
     def mix(
         self,
         other,
-        snr: typing.Union[torch.Tensor, np.ndarray, float] = 10,
-        other_eq: typing.Union[torch.Tensor, np.ndarray] = None,
+        snr: typing.Union[paddle.Tensor, np.ndarray, float] = 10,
+        other_eq: typing.Union[paddle.Tensor, np.ndarray] = None,
     ):
         """Mixes noise with signal at specified
         signal-to-noise ratio. Optionally, the
@@ -39,9 +40,9 @@ class EffectMixin:
         ----------
         other : AudioSignal
             AudioSignal object to mix with.
-        snr : typing.Union[torch.Tensor, np.ndarray, float], optional
+        snr : typing.Union[paddle.Tensor, np.ndarray, float], optional
             Signal to noise ratio, by default 10
-        other_eq : typing.Union[torch.Tensor, np.ndarray], optional
+        other_eq : typing.Union[paddle.Tensor, np.ndarray], optional
             EQ curve to apply to other signal, if any, by default None
 
         Returns
@@ -49,7 +50,7 @@ class EffectMixin:
         AudioSignal
             In-place modification of AudioSignal.
         """
-        snr = util.ensure_tensor(snr).to(self.device)
+        snr = util.ensure_tensor(snr)
 
         pad_len = max(0, self.signal_length - other.signal_length)
         other.zero_pad(0, pad_len)
@@ -93,29 +94,31 @@ class EffectMixin:
             # Use roll to rotate over the max for every item
             # so that the impulse responses don't induce any
             # delay.
-            idx = other.audio_data.abs().argmax(axis=-1)
-            irs = torch.zeros_like(other.audio_data)
+            idx = paddle.argmax(paddle.abs(other.audio_data), axis=-1)
+            irs = paddle.zeros_like(other.audio_data)
             for i in range(other.batch_size):
-                irs[i] = torch.roll(other.audio_data[i], -idx[i].item(), -1)
+                irs[i] = paddle.roll(
+                    other.audio_data[i], shifts=-idx[i].item(), axis=-1
+                )
             other = AudioSignal(irs, other.sample_rate)
 
-        delta = torch.zeros_like(other.audio_data)
+        delta = paddle.zeros_like(other.audio_data)
         delta[..., 0] = 1
 
         length = self.signal_length
-        delta_fft = torch.fft.rfft(delta, length)
-        other_fft = torch.fft.rfft(other.audio_data, length)
-        self_fft = torch.fft.rfft(self.audio_data, length)
+        delta_fft = paddle.fft.rfft(delta, n=length)
+        other_fft = paddle.fft.rfft(other.audio_data, n=length)
+        self_fft = paddle.fft.rfft(self.audio_data, n=length)
 
         convolved_fft = other_fft * self_fft
-        convolved_audio = torch.fft.irfft(convolved_fft, length)
+        convolved_audio = paddle.fft.irfft(convolved_fft, n=length)
 
         delta_convolved_fft = other_fft * delta_fft
-        delta_audio = torch.fft.irfft(delta_convolved_fft, length)
+        delta_audio = paddle.fft.irfft(delta_convolved_fft, n=length)
 
         # Use the delta to rescale the audio exactly as needed.
-        delta_max = delta_audio.abs().max(dim=-1, keepdims=True)[0]
-        scale = 1 / delta_max.clamp(1e-5)
+        delta_max = paddle.max(paddle.abs(delta_audio), axis=-1, keepdim=True)
+        scale = 1 / paddle.clip(delta_max, min=1e-5)
         convolved_audio = convolved_audio * scale
 
         self.audio_data = convolved_audio
@@ -125,8 +128,8 @@ class EffectMixin:
     def apply_ir(
         self,
         ir,
-        drr: typing.Union[torch.Tensor, np.ndarray, float] = None,
-        ir_eq: typing.Union[torch.Tensor, np.ndarray] = None,
+        drr: typing.Union[paddle.Tensor, np.ndarray, float] = None,
+        ir_eq: typing.Union[paddle.Tensor, np.ndarray] = None,
         use_original_phase: bool = False,
     ):
         """Applies an impulse response to the signal. If ` is`ir_eq``
@@ -137,10 +140,10 @@ class EffectMixin:
         ----------
         ir : AudioSignal
             Impulse response to convolve with.
-        drr : typing.Union[torch.Tensor, np.ndarray, float], optional
+        drr : typing.Union[paddle.Tensor, np.ndarray, float], optional
             Direct-to-reverberant ratio that impulse response will be
             altered to, if specified, by default None
-        ir_eq : typing.Union[torch.Tensor, np.ndarray], optional
+        ir_eq : typing.Union[paddle.Tensor, np.ndarray], optional
             Equalization that will be applied to impulse response
             if specified, by default None
         use_original_phase : bool, optional
@@ -158,7 +161,7 @@ class EffectMixin:
             ir = ir.alter_drr(drr)
 
         # Save the peak before
-        max_spk = self.audio_data.abs().max(dim=-1, keepdims=True).values
+        max_spk = self.audio_data.abs().max(axis=-1, keepdim=True)
 
         # Augment the impulse response to simulate microphone effects
         # and with varying direct-to-reverberant ratio.
@@ -168,17 +171,17 @@ class EffectMixin:
         # Use the input phase
         if use_original_phase:
             self.stft()
-            self.stft_data = self.magnitude * torch.exp(1j * phase)
+            self.stft_data = self.magnitude * paddle.exp(1j * phase)
             self.istft()
 
         # Rescale to the input's amplitude
-        max_transformed = self.audio_data.abs().max(dim=-1, keepdims=True).values
-        scale_factor = max_spk.clamp(1e-8) / max_transformed.clamp(1e-8)
+        max_transformed = self.audio_data.abs().max(axis=-1, keepdim=True)
+        scale_factor = max_spk.clip(1e-8) / max_transformed.clip(1e-8)
         self = self * scale_factor
 
         return self
 
-    def ensure_max_of_audio(self, max: float = 1.0):
+    def ensure_max_of_audio(self, _max: float = 1.0):
         """Ensures that ``abs(audio_data) <= max``.
 
         Parameters
@@ -191,19 +194,19 @@ class EffectMixin:
         AudioSignal
             Signal with values scaled between -max and max.
         """
-        peak = self.audio_data.abs().max(dim=-1, keepdims=True)[0]
-        peak_gain = torch.ones_like(peak)
-        peak_gain[peak > max] = max / peak[peak > max]
+        peak = self.audio_data.abs().max(axis=-1, keepdim=True)
+        peak_gain = paddle.ones_like(peak)
+        peak_gain[peak > _max] = _max / peak[peak > _max]
         self.audio_data = self.audio_data * peak_gain
         return self
 
-    def normalize(self, db: typing.Union[torch.Tensor, np.ndarray, float] = -24.0):
+    def normalize(self, db: typing.Union[paddle.Tensor, np.ndarray, float] = -24.0):
         """Normalizes the signal's volume to the specified db, in LUFS.
         This is GPU-compatible, making for very fast loudness normalization.
 
         Parameters
         ----------
-        db : typing.Union[torch.Tensor, np.ndarray, float], optional
+        db : typing.Union[paddle.Tensor, np.ndarray, float], optional
             Loudness to normalize to, by default -24.0
 
         Returns
@@ -211,20 +214,20 @@ class EffectMixin:
         AudioSignal
             Normalized audio signal.
         """
-        db = util.ensure_tensor(db).to(self.device)
+        db = util.ensure_tensor(db)
         ref_db = self.loudness()
         gain = db - ref_db
-        gain = torch.exp(gain * self.GAIN_FACTOR)
+        gain = paddle.exp(gain * self.GAIN_FACTOR)
 
         self.audio_data = self.audio_data * gain[:, None, None]
         return self
 
-    def volume_change(self, db: typing.Union[torch.Tensor, np.ndarray, float]):
+    def volume_change(self, db: typing.Union[paddle.Tensor, np.ndarray, float]):
         """Change volume of signal by some amount, in dB.
 
         Parameters
         ----------
-        db : typing.Union[torch.Tensor, np.ndarray, float]
+        db : typing.Union[paddle.Tensor, np.ndarray, float]
             Amount to change volume by.
 
         Returns
@@ -232,17 +235,17 @@ class EffectMixin:
         AudioSignal
             Signal at new volume.
         """
-        db = util.ensure_tensor(db, ndim=1).to(self.device)
-        gain = torch.exp(db * self.GAIN_FACTOR)
+        db = util.ensure_tensor(db, ndim=1)
+        gain = paddle.exp(db * self.GAIN_FACTOR)
         self.audio_data = self.audio_data * gain[:, None, None]
         return self
 
     def _to_2d(self):
-        waveform = self.audio_data.reshape(-1, self.signal_length)
+        waveform = self.audio_data.reshape([-1, self.signal_length])
         return waveform
 
     def _to_3d(self, waveform):
-        return waveform.reshape(self.batch_size, self.num_channels, -1)
+        return waveform.reshape([self.batch_size, self.num_channels, -1])
 
     def pitch_shift(self, n_semitones: int, quick: bool = True):
         """Pitch shift the signal. All items in the batch
@@ -276,112 +279,112 @@ class EffectMixin:
         self.audio_data = self._to_3d(waveform)
         return self.to(device)
 
-    def time_stretch(self, factor: float, quick: bool = True):
-        """Time stretch the audio signal.
+    # def time_stretch(self, factor: float, quick: bool = True):
+    #     """Time stretch the audio signal.
 
-        Parameters
-        ----------
-        factor : float
-            Factor by which to stretch the AudioSignal. Typically
-            between 0.8 and 1.2.
-        quick : bool, optional
-            Whether to use quick time stretching, by default True
+    #     Parameters
+    #     ----------
+    #     factor : float
+    #         Factor by which to stretch the AudioSignal. Typically
+    #         between 0.8 and 1.2.
+    #     quick : bool, optional
+    #         Whether to use quick time stretching, by default True
 
-        Returns
-        -------
-        AudioSignal
-            Time-stretched AudioSignal.
-        """
-        device = self.device
-        effects = [
-            ["tempo", str(factor)],
-            ["rate", str(self.sample_rate)],
-        ]
-        if quick:
-            effects[0].insert(1, "-q")
+    #     Returns
+    #     -------
+    #     AudioSignal
+    #         Time-stretched AudioSignal.
+    #     """
+    #     device = self.device
+    #     effects = [
+    #         ["tempo", str(factor)],
+    #         ["rate", str(self.sample_rate)],
+    #     ]
+    #     if quick:
+    #         effects[0].insert(1, "-q")
 
-        waveform = self._to_2d().cpu()
-        waveform, sample_rate = torchaudio.sox_effects.apply_effects_tensor(
-            waveform, self.sample_rate, effects, channels_first=True
-        )
-        self.sample_rate = sample_rate
-        self.audio_data = self._to_3d(waveform)
-        return self.to(device)
+    #     waveform = self._to_2d().cpu()
+    #     waveform, sample_rate = torchaudio.sox_effects.apply_effects_tensor(
+    #         waveform, self.sample_rate, effects, channels_first=True
+    #     )
+    #     self.sample_rate = sample_rate
+    #     self.audio_data = self._to_3d(waveform)
+    #     return self.to(device)
 
-    def apply_codec(
-        self,
-        preset: str = None,
-        format: str = "wav",
-        encoding: str = None,
-        bits_per_sample: int = None,
-        compression: int = None,
-    ):  # pragma: no cover
-        """Applies an audio codec to the signal.
+    # def apply_codec(
+    #     self,
+    #     preset: str = None,
+    #     format: str = "wav",
+    #     encoding: str = None,
+    #     bits_per_sample: int = None,
+    #     compression: int = None,
+    # ):  # pragma: no cover
+    #     """Applies an audio codec to the signal.
 
-        Parameters
-        ----------
-        preset : str, optional
-            One of the keys in ``self.CODEC_PRESETS``, by default None
-        format : str, optional
-            Format for audio codec, by default "wav"
-        encoding : str, optional
-            Encoding to use, by default None
-        bits_per_sample : int, optional
-            How many bits per sample, by default None
-        compression : int, optional
-            Compression amount of codec, by default None
+    #     Parameters
+    #     ----------
+    #     preset : str, optional
+    #         One of the keys in ``self.CODEC_PRESETS``, by default None
+    #     format : str, optional
+    #         Format for audio codec, by default "wav"
+    #     encoding : str, optional
+    #         Encoding to use, by default None
+    #     bits_per_sample : int, optional
+    #         How many bits per sample, by default None
+    #     compression : int, optional
+    #         Compression amount of codec, by default None
 
-        Returns
-        -------
-        AudioSignal
-            AudioSignal with codec applied.
+    #     Returns
+    #     -------
+    #     AudioSignal
+    #         AudioSignal with codec applied.
 
-        Raises
-        ------
-        ValueError
-            If preset is not in ``self.CODEC_PRESETS``, an error
-            is thrown.
-        """
-        torchaudio_version_070 = "0.7" in torchaudio.__version__
-        if torchaudio_version_070:
-            return self
+    #     Raises
+    #     ------
+    #     ValueError
+    #         If preset is not in ``self.CODEC_PRESETS``, an error
+    #         is thrown.
+    #     """
+    #     torchaudio_version_070 = "0.7" in torchaudio.__version__
+    #     if torchaudio_version_070:
+    #         return self
 
-        kwargs = {
-            "format": format,
-            "encoding": encoding,
-            "bits_per_sample": bits_per_sample,
-            "compression": compression,
-        }
+    #     kwargs = {
+    #         "format": format,
+    #         "encoding": encoding,
+    #         "bits_per_sample": bits_per_sample,
+    #         "compression": compression,
+    #     }
 
-        if preset is not None:
-            if preset in self.CODEC_PRESETS:
-                kwargs = self.CODEC_PRESETS[preset]
-            else:
-                raise ValueError(
-                    f"Unknown preset: {preset}. "
-                    f"Known presets: {list(self.CODEC_PRESETS.keys())}"
-                )
+    #     if preset is not None:
+    #         if preset in self.CODEC_PRESETS:
+    #             kwargs = self.CODEC_PRESETS[preset]
+    #         else:
+    #             raise ValueError(
+    #                 f"Unknown preset: {preset}. "
+    #                 f"Known presets: {list(self.CODEC_PRESETS.keys())}"
+    #             )
 
-        waveform = self._to_2d()
-        if kwargs["format"] in ["vorbis", "mp3", "ogg", "amr-nb"]:
-            # Apply it in a for loop
-            augmented = torch.cat(
-                [
-                    torchaudio.functional.apply_codec(
-                        waveform[i][None, :], self.sample_rate, **kwargs
-                    )
-                    for i in range(waveform.shape[0])
-                ],
-                dim=0,
-            )
-        else:
-            augmented = torchaudio.functional.apply_codec(
-                waveform, self.sample_rate, **kwargs
-            )
-        augmented = self._to_3d(augmented)
+    #     waveform = self._to_2d()
+    #     if kwargs["format"] in ["vorbis", "mp3", "ogg", "amr-nb"]:
+    #         # Apply it in a for loop
+    #         augmented = torch.cat(
+    #             [
+    #                 torchaudio.functional.apply_codec(
+    #                     waveform[i][None, :], self.sample_rate, **kwargs
+    #                 )
+    #                 for i in range(waveform.shape[0])
+    #             ],
+    #             dim=0,
+    #         )
+    #     else:
+    #         augmented = torchaudio.functional.apply_codec(
+    #             waveform, self.sample_rate, **kwargs
+    #         )
+    #     augmented = self._to_3d(augmented)
 
-        self.audio_data = augmented
-        return self
+    #     self.audio_data = augmented
+    #     return self
 
     def mel_filterbank(self, n_bands: int):
         """Breaks signal into mel bands.
@@ -393,21 +396,19 @@ class EffectMixin:
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Mel-filtered bands, with last axis being the band index.
         """
-        filterbank = (
-            julius.SplitBands(self.sample_rate, n_bands).float().to(self.device)
-        )
+        filterbank = SplitBands(self.sample_rate, n_bands).float()
         filtered = filterbank(self.audio_data)
-        return filtered.permute(1, 2, 3, 0)
+        return filtered.transpose([1, 2, 3, 0])
 
-    def equalizer(self, db: typing.Union[torch.Tensor, np.ndarray]):
+    def equalizer(self, db: typing.Union[paddle.Tensor, np.ndarray]):
         """Applies a mel-spaced equalizer to the audio signal.
 
         Parameters
         ----------
-        db : typing.Union[torch.Tensor, np.ndarray]
+        db : typing.Union[paddle.Tensor, np.ndarray]
             EQ curve to apply.
 
         Returns
@@ -426,21 +427,21 @@ class EffectMixin:
         else:
             db = db.unsqueeze(0)
 
-        weights = (10**db).to(self.device).float()
+        weights = (10**db).astype("float32")
         fbank = fbank * weights[:, None, None, :]
         eq_audio_data = fbank.sum(-1)
         self.audio_data = eq_audio_data
         return self
 
     def clip_distortion(
-        self, clip_percentile: typing.Union[torch.Tensor, np.ndarray, float]
+        self, clip_percentile: typing.Union[paddle.Tensor, np.ndarray, float]
     ):
         """Clips the signal at a given percentile. The higher it is,
         the lower the threshold for clipping.
 
         Parameters
         ----------
-        clip_percentile : typing.Union[torch.Tensor, np.ndarray, float]
+        clip_percentile : typing.Union[paddle.Tensor, np.ndarray, float]
             Values are between 0.0 to 1.0. Typical values are 0.1 or below.
 
         Returns
@@ -449,81 +450,91 @@ class EffectMixin:
             Audio signal with clipped audio data.
         """
         clip_percentile = util.ensure_tensor(clip_percentile, ndim=1)
-        min_thresh = torch.quantile(self.audio_data, clip_percentile / 2, dim=-1)
-        max_thresh = torch.quantile(self.audio_data, 1 - (clip_percentile / 2), dim=-1)
+        clip_percentile = clip_percentile.cpu().numpy()
+        min_thresh = paddle.quantile(
+            self.audio_data, (clip_percentile / 2).tolist(), axis=-1
+        )[None]
+        max_thresh = paddle.quantile(
+            self.audio_data, (1 - clip_percentile / 2).tolist(), axis=-1
+        )[None]
 
         nc = self.audio_data.shape[1]
         min_thresh = min_thresh[:, :nc, :]
         max_thresh = max_thresh[:, :nc, :]
 
-        self.audio_data = self.audio_data.clamp(min_thresh, max_thresh)
+        self.audio_data = self.audio_data.clip(min_thresh, max_thresh)
 
         return self
 
-    def quantization(
-        self, quantization_channels: typing.Union[torch.Tensor, np.ndarray, int]
-    ):
-        """Applies quantization to the input waveform.
+    # def quantization(
+    #     self, quantization_channels: typing.Union[paddle.Tensor, np.ndarray, int]
+    # ):
+    #     """Applies quantization to the input waveform.
 
-        Parameters
-        ----------
-        quantization_channels : typing.Union[torch.Tensor, np.ndarray, int]
-            Number of evenly spaced quantization channels to quantize
-            to.
+    #     Parameters
+    #     ----------
+    #     quantization_channels : typing.Union[paddle.Tensor, np.ndarray, int]
+    #         Number of evenly spaced quantization channels to quantize
+    #         to.
 
-        Returns
-        -------
-        AudioSignal
-            Quantized AudioSignal.
-        """
-        quantization_channels = util.ensure_tensor(quantization_channels, ndim=3)
+    #     Returns
+    #     -------
+    #     AudioSignal
+    #         Quantized AudioSignal.
+    #     """
+    #     quantization_channels = util.ensure_tensor(quantization_channels, ndim=3)
 
-        x = self.audio_data
-        x = (x + 1) / 2
-        x = x * quantization_channels
-        x = x.floor()
-        x = x / quantization_channels
-        x = 2 * x - 1
+    #     x = self.audio_data
+    #     x = (x + 1) / 2
+    #     x = x * quantization_channels
+    #     x = x.floor()
+    #     x = x / quantization_channels
+    #     x = 2 * x - 1
 
-        residual = (self.audio_data - x).detach()
-        self.audio_data = self.audio_data - residual
-        return self
+    #     residual = (self.audio_data - x).detach()
+    #     self.audio_data = self.audio_data - residual
+    #     return self
 
-    def mulaw_quantization(
-        self, quantization_channels: typing.Union[torch.Tensor, np.ndarray, int]
-    ):
-        """Applies mu-law quantization to the input waveform.
+    # def mulaw_quantization(
+    #     self, quantization_channels: typing.Union[paddle.Tensor, np.ndarray, int]
+    # ):
+    #     """Applies mu-law quantization to the input waveform.
 
-        Parameters
-        ----------
-        quantization_channels : typing.Union[torch.Tensor, np.ndarray, int]
-            Number of mu-law spaced quantization channels to quantize
-            to.
+    #     Parameters
+    #     ----------
+    #     quantization_channels : typing.Union[paddle.Tensor, np.ndarray, int]
+    #         Number of mu-law spaced quantization channels to quantize
+    #         to.
 
-        Returns
-        -------
-        AudioSignal
-            Quantized AudioSignal.
-        """
-        mu = quantization_channels - 1.0
-        mu = util.ensure_tensor(mu, ndim=3)
+    #     Returns
+    #     -------
+    #     AudioSignal
+    #         Quantized AudioSignal.
+    #     """
+    #     mu = quantization_channels - 1.0
+    #     mu = util.ensure_tensor(mu, ndim=3)
 
-        x = self.audio_data
+    #     x = self.audio_data
 
-        # quantize
-        x = torch.sign(x) * torch.log1p(mu * torch.abs(x)) / torch.log1p(mu)
-        x = ((x + 1) / 2 * mu + 0.5).to(torch.int64)
+    #     # quantize
+    #     x = torch.sign(x) * torch.log1p(mu * torch.abs(x)) / torch.log1p(mu)
+    #     x = ((x + 1) / 2 * mu + 0.5).to(torch.int64)
 
-        # unquantize
-        x = (x / mu) * 2 - 1.0
-        x = torch.sign(x) * (torch.exp(torch.abs(x) * torch.log1p(mu)) - 1.0) / mu
+    #     # unquantize
+    #     x = (x / mu) * 2 - 1.0
+    #     x = torch.sign(x) * (torch.exp(torch.abs(x) * torch.log1p(mu)) - 1.0) / mu
 
-        residual = (self.audio_data - x).detach()
-        self.audio_data = self.audio_data - residual
-        return self
+    #     residual = (self.audio_data - x).detach()
+    #     self.audio_data = self.audio_data - residual
+    #     return self
 
-    def __matmul__(self, other):
-        return self.convolve(other)
+    # def __matmul__(self, other):
+    #     return self.convolve(other)
+
+
+import paddle
+import typing
+import numpy as np
 
 
 class ImpulseResponseMixin:
@@ -546,31 +557,47 @@ class ImpulseResponseMixin:
         # Breaking up into early
         # response + late field response.
 
-        td = torch.argmax(self.audio_data, dim=-1, keepdim=True)
+        td = paddle.argmax(self.audio_data, axis=-1, keepdim=True)
         t0 = int(self.sample_rate * 0.0025)
 
-        idx = torch.arange(self.audio_data.shape[-1], device=self.device)[None, None, :]
-        idx = idx.expand(self.batch_size, -1, -1)
+        idx = paddle.arange(self.audio_data.shape[-1])[None, None, :]
+        idx = idx.expand([self.batch_size, -1, -1])
         early_idx = (idx >= td - t0) * (idx <= td + t0)
 
-        early_response = torch.zeros_like(self.audio_data, device=self.device)
-        early_response[early_idx] = self.audio_data[early_idx]
+        early_response = paddle.zeros_like(self.audio_data)
+
+        # early_response[early_idx] = self.audio_data[early_idx]
+        early_response = paddle.where(early_idx, self.audio_data, early_response)
 
         late_idx = ~early_idx
-        late_field = torch.zeros_like(self.audio_data, device=self.device)
-        late_field[late_idx] = self.audio_data[late_idx]
+        late_field = paddle.zeros_like(self.audio_data)
+        # late_field[late_idx] = self.audio_data[late_idx]
+        late_field = paddle.where(late_idx, self.audio_data, late_field)
 
         # Equation 4
         # ----------
         # Decompose early response into windowed
         # direct path and windowed residual.
 
-        window = torch.zeros_like(self.audio_data, device=self.device)
+        window = paddle.zeros_like(self.audio_data)
         for idx in range(self.batch_size):
-            window_idx = early_idx[idx, 0].nonzero()
-            window[idx, ..., window_idx] = self.get_window(
-                "hann", window_idx.shape[-1], self.device
+            window_idx = early_idx[idx, 0]
+
+            # ----- Just for this -----
+            # window[idx, ..., window_idx] = self.get_window("hann", window_idx.sum().item())
+            indices = paddle.nonzero(window_idx).reshape(
+                [-1]
+            )  # shape: [num_true], dtype: int64
+            temp_window = self.get_window("hann", indices.shape[0])
+
+            window_slice = window[idx, 0]
+            updated_window_slice = paddle.scatter(
+                window_slice, index=indices, updates=temp_window
             )
+
+            window[idx, 0] = updated_window_slice
+            # ----- Just for that -----
+
         return early_response, late_field, window
 
     def measure_drr(self):
@@ -583,9 +610,9 @@ class ImpulseResponseMixin:
             Direct-to-reverberant ratio
         """
         early_response, late_field, _ = self.decompose_ir()
-        num = (early_response**2).sum(dim=-1)
-        den = (late_field**2).sum(dim=-1)
-        drr = 10 * torch.log10(num / den)
+        num = (early_response**2).sum(axis=-1)
+        den = (late_field**2).sum(axis=-1)
+        drr = 10 * paddle.log10(num / den)
         return drr
 
     @staticmethod
@@ -601,25 +628,25 @@ class ImpulseResponseMixin:
         wd_sq_1 = (1 - wd) ** 2
         e_sq = early_response**2
         l_sq = late_field**2
-        a = (wd_sq * e_sq).sum(dim=-1)
-        b = (2 * (1 - wd) * wd * e_sq).sum(dim=-1)
-        c = (wd_sq_1 * e_sq).sum(dim=-1) - torch.pow(10, target_drr / 10) * l_sq.sum(
-            dim=-1
-        )
+        a = (wd_sq * e_sq).sum(axis=-1)
+        b = (2 * (1 - wd) * wd * e_sq).sum(axis=-1)
+        c = (wd_sq_1 * e_sq).sum(axis=-1) - paddle.pow(
+            10 * paddle.ones_like(target_drr), target_drr / 10
+        ) * l_sq.sum(axis=-1)
 
         expr = ((b**2) - 4 * a * c).sqrt()
-        alpha = torch.maximum(
+        alpha = paddle.maximum(
             (-b - expr) / (2 * a),
             (-b + expr) / (2 * a),
         )
         return alpha
 
-    def alter_drr(self, drr: typing.Union[torch.Tensor, np.ndarray, float]):
+    def alter_drr(self, drr: typing.Union[paddle.Tensor, np.ndarray, float]):
         """Alters the direct-to-reverberant ratio of the impulse response.
 
         Parameters
         ----------
-        drr : typing.Union[torch.Tensor, np.ndarray, float]
+        drr : typing.Union[paddle.Tensor, np.ndarray, float]
             Direct-to-reverberant ratio that impulse response will be
             altered to, if specified, by default None
 
@@ -628,14 +655,16 @@ class ImpulseResponseMixin:
         AudioSignal
             Altered impulse response.
         """
-        drr = util.ensure_tensor(drr, 2, self.batch_size).to(self.device)
+        drr = util.ensure_tensor(
+            drr, 2, self.batch_size
+        )  # Assuming util.ensure_tensor is adapted or equivalent exists
 
         early_response, late_field, window = self.decompose_ir()
         alpha = self.solve_alpha(early_response, late_field, window, drr)
         min_alpha = (
-            late_field.abs().max(dim=-1)[0] / early_response.abs().max(dim=-1)[0]
+            late_field.abs().max(axis=-1)[0] / early_response.abs().max(axis=-1)[0]
         )
-        alpha = torch.maximum(alpha, min_alpha)[..., None]
+        alpha = paddle.maximum(alpha, min_alpha)[..., None]
 
         aug_ir_data = (
             alpha * window * early_response
@@ -643,5 +672,5 @@ class ImpulseResponseMixin:
             + late_field
         )
         self.audio_data = aug_ir_data
-        self.ensure_max_of_audio()
+        self.ensure_max_of_audio()  # Assuming ensure_max_of_audio is a method defined elsewhere
         return self

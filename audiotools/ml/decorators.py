@@ -4,8 +4,8 @@ import time
 from collections import defaultdict
 from functools import wraps
 
-import torch
-import torch.distributed as dist
+import paddle
+import paddle.distributed as dist
 from rich import box
 from rich.console import Console
 from rich.console import Group
@@ -20,7 +20,7 @@ from rich.progress import TimeElapsedColumn
 from rich.progress import TimeRemainingColumn
 from rich.rule import Rule
 from rich.table import Table
-from torch.utils.tensorboard import SummaryWriter
+from visualdl import LogWriter
 
 
 # This is here so that the history can be pickled.
@@ -29,7 +29,7 @@ def default_list():
 
 
 class Mean:
-    """Keeps track of the running mean, along with the latest
+    """✅Keeps track of the running mean, along with the latest
     value.
     """
 
@@ -51,7 +51,7 @@ class Mean:
 
 
 def when(condition):
-    """Runs a function only when the condition is met. The condition is
+    """✅Runs a function only when the condition is met. The condition is
     a function that is run.
 
     Parameters
@@ -89,7 +89,7 @@ def when(condition):
 
 
 def timer(prefix: str = "time"):
-    """Adds execution time to the output dictionary of the decorated
+    """✅Adds execution time to the output dictionary of the decorated
     function. The function decorated by this must output a dictionary.
     The key added will follow the form "[prefix]/[name_of_function]"
 
@@ -116,7 +116,7 @@ def timer(prefix: str = "time"):
 
 
 class Tracker:
-    """
+    """✅
     A tracker class that helps to monitor the progress of training and logging the metrics.
 
     Attributes
@@ -125,8 +125,8 @@ class Tracker:
         A dictionary containing the metrics for each label.
     history : dict
         A dictionary containing the history of metrics for each label.
-    writer : SummaryWriter
-        A SummaryWriter object for logging the metrics.
+    writer : LogWriter
+        A LogWriter object for logging the metrics.
     rank : int
         The rank of the current process.
     step : int
@@ -162,7 +162,7 @@ class Tracker:
 
     def __init__(
         self,
-        writer: SummaryWriter = None,
+        writer: LogWriter = None,
         log_file: str = None,
         rank: int = 0,
         console_width: int = 100,
@@ -173,8 +173,8 @@ class Tracker:
 
         Parameters
         ----------
-        writer : SummaryWriter, optional
-            A SummaryWriter object for logging the metrics, by default None.
+        writer : LogWriter, optional
+            A LogWriter object for logging the metrics, by default None.
         log_file : str, optional
             The path to the log file, by default None.
         rank : int, optional
@@ -254,7 +254,10 @@ class Tracker:
                     Rule(f"[italic]{fn_name}()", style="white"),
                     Padding("", (0, 0)),
                     Panel.fit(
-                        group, padding=(0, 5), title="[b]Progress", border_style="blue"
+                        group,
+                        padding=(0, 5),
+                        title="[b]Progress",
+                        border_style="blue",
                     ),
                 )
             )
@@ -326,13 +329,13 @@ class Tracker:
                 scalar_keys = []
                 for k, v in output.items():
                     if isinstance(v, (int, float)):
-                        v = torch.tensor([v])
-                    if not torch.is_tensor(v):
+                        v = paddle.to_tensor([v])
+                    if not paddle.is_tensor(v):
                         continue
                     if ddp_active and v.is_cuda:  # pragma: no cover
                         dist.all_reduce(v, op=op)
                     output[k] = v.detach()
-                    if torch.numel(v) == 1:
+                    if paddle.numel(v) == 1:
                         scalar_keys.append(k)
                         output[k] = v.item()
 
@@ -379,7 +382,9 @@ class Tracker:
                     for k, v in metrics.items():
                         v = v() if isinstance(v, Mean) else v
                         if self.writer is not None:
-                            self.writer.add_scalar(f"{k}/{label}", v, self.step)
+                            self.writer.add_scalar(
+                                tag=f"{k}/{label}", value=v, step=self.step
+                            )
                         if label in self.history:
                             self.history[label][k].append(v)
 

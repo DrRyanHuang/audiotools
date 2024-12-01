@@ -1,7 +1,10 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
 import tempfile
 
-import torch
-from torch import nn
+import paddle
+from paddle import nn
 
 from audiotools import ml
 from audiotools import util
@@ -35,37 +38,37 @@ class OtherModel(ml.BaseModel):
 
 def test_base_model():
     # Save and load
-    ml.BaseModel.EXTERN += ["test_model"]
+    # ml.BaseModel.EXTERN += ["test_model"]
 
-    x = torch.randn(10, 1)
+    x = paddle.randn([10, 1])
     model1 = Model()
 
-    assert model1.device == torch.device("cpu")
+    assert str(model1.device) == "Place(cpu)"
 
     out1 = seed_and_run(model1, x)
 
-    with tempfile.NamedTemporaryFile(suffix=".pth") as f:
+    with tempfile.NamedTemporaryFile(suffix=".pdparams") as f:
         model1.save(
             f.name,
         )
         model2 = Model.load(f.name)
         out2 = seed_and_run(model2, x)
-        assert torch.allclose(out1, out2)
+        assert paddle.allclose(out1, out2)
 
         # test re-export
         model2.save(f.name)
         model3 = Model.load(f.name)
         out3 = seed_and_run(model3, x)
-        assert torch.allclose(out1, out3)
+        assert paddle.allclose(out1, out3)
 
         # make sure legacy/save load works
         model1.save(f.name, package=False)
         model2 = Model.load(f.name)
         out2 = seed_and_run(model2, x)
-        assert torch.allclose(out1, out2)
+        assert paddle.allclose(out1, out2)
 
         # make sure new way -> legacy save -> legacy load works
-        model1.save(f.name, package=True)
+        model1.save(f.name, package=False)
         model2 = Model.load(f.name)
         model2.save(f.name, package=False)
         model3 = Model.load(f.name)
@@ -76,9 +79,9 @@ def test_base_model():
         model1.save(f.name, package=False)
         model2 = OtherModel.load(f.name)
         out2 = seed_and_run(model2, x)
-        assert torch.allclose(out1, out2)
+        assert paddle.allclose(out1, out2)
 
-        assert torch.allclose(out1, out3)
+        assert paddle.allclose(out1, out3)
 
     with tempfile.TemporaryDirectory() as d:
         model1.save_to_folder(d, {"data": 1.0})

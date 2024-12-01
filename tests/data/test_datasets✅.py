@@ -1,10 +1,12 @@
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
+sys.path.append("/home/work/pdaudoio")
+import paddle
 import audiotools
 from audiotools.data import transforms as tfm
 
@@ -53,7 +55,7 @@ def test_audio_dataset():
         n_examples=100,
         transform=transform,
     )
-    dataloader = torch.utils.data.DataLoader(
+    dataloader = paddle.io.DataLoader(
         dataset,
         batch_size=16,
         num_workers=0,
@@ -69,11 +71,11 @@ def test_audio_dataset():
 
         mask = kwargs["Compose"]["1.Silence"]["mask"]
 
-        zeros_ = torch.zeros_like(signal[mask].audio_data)
+        zeros_ = paddle.zeros_like(signal[mask].audio_data)
         original_ = original[~mask].audio_data
 
-        assert torch.allclose(signal[mask].audio_data, zeros_)
-        assert torch.allclose(signal[~mask].audio_data, original_)
+        assert paddle.allclose(signal[mask].audio_data, zeros_)
+        assert paddle.allclose(signal[~mask].audio_data, original_)
 
 
 def test_aligned_audio_dataset():
@@ -89,7 +91,7 @@ def test_aligned_audio_dataset():
         dataset = audiotools.data.datasets.AudioDataset(
             loaders, 44100, n_examples=1000, aligned=True, shuffle_loaders=True
         )
-        dataloader = torch.utils.data.DataLoader(
+        dataloader = paddle.io.DataLoader(
             dataset,
             batch_size=16,
             num_workers=0,
@@ -182,7 +184,7 @@ def test_dataset_pipeline():
         n_examples=10,
         transform=transform,
     )
-    dataloader = torch.utils.data.DataLoader(
+    dataloader = paddle.io.DataLoader(
         dataset, num_workers=0, batch_size=1, collate_fn=dataset.collate
     )
     for batch in dataloader:

@@ -1,7 +1,10 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
 import time
 
-import torch
-from torch.utils.tensorboard import SummaryWriter
+import paddle
+from visualdl import LogWriter
 
 from audiotools.ml.decorators import timer
 from audiotools.ml.decorators import Tracker
@@ -12,7 +15,7 @@ def test_all_decorators():
     rank = 0
     max_iters = 100
 
-    writer = SummaryWriter("/tmp/logs")
+    writer = LogWriter("/tmp/logs")
     tracker = Tracker(writer, log_file="/tmp/log.txt")
 
     train_data = range(100)
@@ -25,11 +28,11 @@ def test_all_decorators():
         i = tracker.step
         time.sleep(0.01)
         return {
-            "loss": torch.exp(torch.FloatTensor([-i / 100])),
-            "mel": torch.exp(torch.FloatTensor([-i / 100])),
-            "stft": torch.exp(torch.FloatTensor([-i / 100])),
-            "waveform": torch.exp(torch.FloatTensor([-i / 100])),
-            "not_scalar": torch.arange(10),
+            "loss": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "mel": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "stft": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "waveform": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "not_scalar": paddle.arange(start=0, end=10, step=1, dtype="int64"),
         }
 
     @tracker.track("val", len(val_data))
@@ -38,16 +41,16 @@ def test_all_decorators():
         i = tracker.step
         time.sleep(0.01)
         return {
-            "loss": torch.exp(torch.FloatTensor([-i / 100])),
-            "mel": torch.exp(torch.FloatTensor([-i / 100])),
-            "stft": torch.exp(torch.FloatTensor([-i / 100])),
-            "waveform": torch.exp(torch.FloatTensor([-i / 100])),
-            "not_scalar": torch.arange(10),
+            "loss": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "mel": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "stft": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "waveform": paddle.exp(paddle.to_tensor([-i / 100], dtype="float32")),
+            "not_scalar": paddle.arange(10, dtype="int64"),
             "string": "string",
         }
 
     @when(lambda: tracker.step % 1000 == 0 and rank == 0)
-    @torch.no_grad()
+    @paddle.no_grad()
     def save_samples():
         tracker.print("Saving samples to TensorBoard.")
 
@@ -61,7 +64,7 @@ def test_all_decorators():
 
     @when(lambda: tracker.step % 100 == 0)
     @tracker.log("val", "mean")
-    @torch.no_grad()
+    @paddle.no_grad()
     def validate():
         for _ in range(len(val_data)):
             output = val_loop()
@@ -87,3 +90,7 @@ def test_all_decorators():
             validate()
             checkpoint()
             train_loop_2()
+
+
+if __name__ == "__main__":
+    test_all_decorators()

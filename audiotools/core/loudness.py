@@ -1,14 +1,14 @@
 import copy
 
-import julius
 import numpy as np
+import paddle
+import paddle.nn.functional as F
 import scipy
-import torch
-import torch.nn.functional as F
-import torchaudio
+
+from . import _julius
 
 
-class Meter(torch.nn.Module):
+class Meter(paddle.nn.Layer):
     """Tensorized version of pyloudnorm.Meter. Works with batched audio tensors.
 
     Parameters
@@ -46,7 +46,7 @@ class Meter(torch.nn.Module):
         self.block_size = block_size
         self.use_fir = use_fir
 
-        G = torch.from_numpy(np.array([1.0, 1.0, 1.0, 1.41, 1.41]))
+        G = paddle.to_tensor(np.array([1.0, 1.0, 1.0, 1.41, 1.41]), stop_gradient=True)
         self.register_buffer("G", G)
 
         # Compute impulse responses so that filtering is fast via
@@ -55,108 +55,121 @@ class Meter(torch.nn.Module):
         impulse[..., 0] = 1.0
 
         firs = np.zeros((len(self._filters), 1, zeros))
-        passband_gain = torch.zeros(len(self._filters))
+        # passband_gain = torch.zeros(len(self._filters))
+        passband_gain = paddle.zeros([len(self._filters)], dtype="float32")
 
         for i, (_, filter_stage) in enumerate(self._filters.items()):
             firs[i] = scipy.signal.lfilter(filter_stage.b, filter_stage.a, impulse)
             passband_gain[i] = filter_stage.passband_gain
 
-        firs = torch.from_numpy(firs[..., ::-1].copy()).float()
+        firs = paddle.to_tensor(
+            firs[..., ::-1].copy(), dtype="float32", stop_gradient=True
+        )
 
         self.register_buffer("firs", firs)
         self.register_buffer("passband_gain", passband_gain)
 
-    def apply_filter_gpu(self, data: torch.Tensor):
+    def apply_filter_gpu(self, data: paddle.Tensor):
         """Performs FIR approximation of loudness computation.
 
         Parameters
         ----------
-        data : torch.Tensor
+        data : paddle.Tensor
             Audio data of shape (nb, nch, nt).
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Filtered audio data.
         """
         # Data is of shape (nb, nch, nt)
         # Reshape to (nb*nch, 1, nt)
         nb, nt, nch = data.shape
-        data = data.permute(0, 2, 1)
-        data = data.reshape(nb * nch, 1, nt)
+        data = data.transpose([0, 2, 1])
+        data = data.reshape([nb * nch, 1, nt])
 
         # Apply padding
         pad_length = self.firs.shape[-1]
 
         # Apply filtering in sequence
         for i in range(self.firs.shape[0]):
-            data = F.pad(data, (pad_length, pad_length))
-            data = julius.fftconv.fft_conv1d(data, self.firs[i, None, ...])
+            data = F.pad(data, (pad_length, pad_length), data_format="NCL")
+            data = _julius.fft_conv1d(data, self.firs[i, None, ...])
             data = self.passband_gain[i] * data
             data = data[..., 1 : nt + 1]
 
-        data = data.permute(0, 2, 1)
+        data = data.transpose([0, 2, 1])
         data = data[:, :nt, :]
         return data
 
-    def apply_filter_cpu(self, data: torch.Tensor):
+    @staticmethod
+    def scipy_lfilter(waveform, a_coeffs, b_coeffs, clamp: bool = True):
+        # 使用 scipy.signal.lfilter 进行滤波（处理三维数据）
+        output = np.zeros_like(waveform)
+        for batch_idx in range(waveform.shape[0]):
+            for channel_idx in range(waveform.shape[2]):
+                output[batch_idx, :, channel_idx] = scipy.signal.lfilter(
+                    b_coeffs, a_coeffs, waveform[batch_idx, :, channel_idx]
+                )
+        return output
+
+    def apply_filter_cpu(self, data: paddle.Tensor):
         """Performs IIR formulation of loudness computation.
 
         Parameters
         ----------
-        data : torch.Tensor
+        data : paddle.Tensor
             Audio data of shape (nb, nch, nt).
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Filtered audio data.
         """
+        _data = data.cpu().numpy().copy()
         for _, filter_stage in self._filters.items():
             passband_gain = filter_stage.passband_gain
 
-            a_coeffs = torch.from_numpy(filter_stage.a).float().to(data.device)
-            b_coeffs = torch.from_numpy(filter_stage.b).float().to(data.device)
+            a_coeffs = filter_stage.a
+            b_coeffs = filter_stage.b
 
-            _data = data.permute(0, 2, 1)
-            filtered = torchaudio.functional.lfilter(
-                _data, a_coeffs, b_coeffs, clamp=False
-            )
-            data = passband_gain * filtered.permute(0, 2, 1)
+            filtered = self.scipy_lfilter(_data, a_coeffs, b_coeffs)
+            _data[:] = passband_gain * filtered
+        data = paddle.to_tensor(_data)
         return data
 
-    def apply_filter(self, data: torch.Tensor):
+    def apply_filter(self, data: paddle.Tensor):
         """Applies filter on either CPU or GPU, depending
         on if the audio is on GPU or is on CPU, or if
         ``self.use_fir`` is True.
 
         Parameters
         ----------
-        data : torch.Tensor
+        data : paddle.Tensor
             Audio data of shape (nb, nch, nt).
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Filtered audio data.
         """
-        if data.is_cuda or self.use_fir:
+        if data.place.is_gpu_place() or self.use_fir:
             data = self.apply_filter_gpu(data)
         else:
             data = self.apply_filter_cpu(data)
         return data
 
-    def forward(self, data: torch.Tensor):
+    def forward(self, data: paddle.Tensor):
         """Computes integrated loudness of data.
 
         Parameters
         ----------
-        data : torch.Tensor
+        data : paddle.Tensor
             Audio data of shape (nb, nch, nt).
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Filtered audio data.
         """
         return self.integrated_loudness(data)
@@ -168,30 +181,30 @@ class Meter(torch.nn.Module):
 
         kernel_size = int(T_g * self.rate)
         stride = int(T_g * self.rate * step)
-        unfolded = julius.core.unfold(input_data.permute(0, 2, 1), kernel_size, stride)
-        unfolded = unfolded.transpose(-1, -2)
+        unfolded = _julius.unfold(input_data.transpose([0, 2, 1]), kernel_size, stride)
+        unfolded = unfolded.transpose([0, 1, 3, 2])
 
         return unfolded
 
-    def integrated_loudness(self, data: torch.Tensor):
+    def integrated_loudness(self, data: paddle.Tensor):
         """Computes integrated loudness of data.
 
         Parameters
         ----------
-        data : torch.Tensor
+        data : paddle.Tensor
             Audio data of shape (nb, nch, nt).
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Filtered audio data.
         """
-        if not torch.is_tensor(data):
-            data = torch.from_numpy(data).float()
+        if not paddle.is_tensor(data):
+            data = paddle.to_tensor(data, dtype="float32")
         else:
-            data = data.float()
+            data = data.astype("float32")
 
-        input_data = copy.copy(data)
+        input_data = data.clone()
         # Data always has a batch and channel dimension.
         # Is of shape (nb, nt, nch)
         if input_data.ndim < 2:
@@ -212,7 +225,7 @@ class Meter(torch.nn.Module):
         unfolded = self._unfold(input_data)
 
         z = (1.0 / (T_g * self.rate)) * unfolded.square().sum(2)
-        l = -0.691 + 10.0 * torch.log10((G[None, :nch, None] * z).sum(1, keepdim=True))
+        l = -0.691 + 10.0 * paddle.log10((G[None, :nch, None] * z).sum(1, keepdim=True))
         l = l.expand_as(z)
 
         # find gating block indices above absolute threshold
@@ -223,10 +236,10 @@ class Meter(torch.nn.Module):
 
         # calculate the relative threshold value (see eq. 6)
         Gamma_r = (
-            -0.691 + 10.0 * torch.log10((z_avg_gated * G[None, :nch]).sum(-1)) - 10.0
+            -0.691 + 10.0 * paddle.log10((z_avg_gated * G[None, :nch]).sum(-1)) - 10.0
         )
         Gamma_r = Gamma_r[:, None, None]
-        Gamma_r = Gamma_r.expand(nb, nch, l.shape[-1])
+        Gamma_r = Gamma_r.expand([nb, nch, l.shape[-1]])
 
         # find gating block indices above relative and absolute thresholds  (end of eq. 7)
         z_avg_gated = z
@@ -237,14 +250,14 @@ class Meter(torch.nn.Module):
 
         # # Cannot use nan_to_num (pytorch 1.8 does not come with GCP-supported cuda version)
         # z_avg_gated = torch.nan_to_num(z_avg_gated)
-        z_avg_gated = torch.where(
-            z_avg_gated.isnan(), torch.zeros_like(z_avg_gated), z_avg_gated
+        z_avg_gated = paddle.where(
+            paddle.isnan(z_avg_gated), paddle.zeros_like(z_avg_gated), z_avg_gated
         )
         z_avg_gated[z_avg_gated == float("inf")] = float(np.finfo(np.float32).max)
         z_avg_gated[z_avg_gated == -float("inf")] = float(np.finfo(np.float32).min)
 
-        LUFS = -0.691 + 10.0 * torch.log10((G[None, :nch] * z_avg_gated).sum(1))
-        return LUFS.float()
+        LUFS = -0.691 + 10.0 * paddle.log10((G[None, :nch] * z_avg_gated).sum(1))
+        return LUFS.astype("float32")
 
     @property
     def filter_class(self):
@@ -294,11 +307,11 @@ class LoudnessMixin:
 
         Returns
         -------
-        torch.Tensor
+        paddle.Tensor
             Loudness of audio data.
         """
         if self._loudness is not None:
-            return self._loudness.to(self.device)
+            return self._loudness  # .to(self.device)
         original_length = self.signal_length
         if self.signal_duration < 0.5:
             pad_len = int((0.5 - self.signal_duration) * self.sample_rate)
@@ -308,13 +321,11 @@ class LoudnessMixin:
         meter = Meter(
             self.sample_rate, filter_class=filter_class, block_size=block_size, **kwargs
         )
-        meter = meter.to(self.device)
+        # meter = meter.to(self.device)
         # measure loudness
-        loudness = meter.integrated_loudness(self.audio_data.permute(0, 2, 1))
+        loudness = meter.integrated_loudness(self.audio_data.transpose([0, 2, 1]))
         self.truncate_samples(original_length)
-        min_loudness = (
-            torch.ones_like(loudness, device=loudness.device) * self.MIN_LOUDNESS
-        )
-        self._loudness = torch.maximum(loudness, min_loudness)
+        min_loudness = paddle.ones_like(loudness) * self.MIN_LOUDNESS
+        self._loudness = paddle.maximum(loudness, min_loudness)
 
-        return self._loudness.to(self.device)
+        return self._loudness  # .to(self.device)

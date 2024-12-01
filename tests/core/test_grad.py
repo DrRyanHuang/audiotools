@@ -1,9 +1,11 @@
+import sys
+
+sys.path.append("/home/work/pdaudoio")
 from typing import Callable
 
 import numpy as np
+import paddle
 import pytest
-import torch
-import torchaudio
 
 from audiotools import AudioSignal
 
@@ -14,7 +16,7 @@ def test_audio_grad():
 
     def _test_audio_grad(attr: str, target=True, kwargs: dict = {}):
         signal = AudioSignal(audio_path)
-        signal.audio_data.requires_grad = True
+        signal.audio_data.stop_gradient = False
 
         assert signal.audio_data.grad is None
 
@@ -27,7 +29,8 @@ def test_audio_grad():
                 # If necessary, propagate spectrogram changes to waveform
                 if result.stft_data is not None:
                     result.istft()
-                if result.audio_data.dtype.is_complex:
+                # if result.audio_data.dtype.is_complex:
+                if paddle.is_complex(result.audio_data):
                     result.audio_data.real.sum().backward()
                 else:
                     result.audio_data.sum().backward()
@@ -47,7 +50,7 @@ def test_audio_grad():
         [
             "apply_ir",
             True,
-            {"ir": AudioSignal(ir_path), "drr": 0.1, "ir_eq": torch.randn(6)},
+            {"ir": AudioSignal(ir_path), "drr": 0.1, "ir_eq": paddle.randn([6])},
         ],
         ["ensure_max_of_audio", True],
         ["normalize", True],
@@ -55,7 +58,7 @@ def test_audio_grad():
         ["pitch_shift", False, {"n_semitones": 1}],
         ["time_stretch", False, {"factor": 2}],
         ["apply_codec", False],
-        ["equalizer", True, {"db": torch.randn(6)}],
+        ["equalizer", True, {"db": paddle.randn([6])}],
         ["clip_distortion", True, {"clip_percentile": 0.5}],
         ["quantization", True, {"quantization_channels": 8}],
         ["mulaw_quantization", True, {"quantization_channels": 8}],
@@ -94,7 +97,7 @@ def test_batch_grad():
     audio_path = "tests/audio/spk/f10_script4_produced.wav"
 
     signal = AudioSignal(audio_path)
-    signal.audio_data.requires_grad = True
+    signal.audio_data.stop_gradient = False
 
     assert signal.audio_data.grad is None
 

@@ -4,14 +4,14 @@ import tempfile
 import typing
 from pathlib import Path
 
-import torch
-from torch import nn
+import paddle
+from paddle import nn
 
 
-class BaseModel(nn.Module):
+class BaseModel(nn.Layer):
     """This is a class that adds useful save/load functionality to a
-    ``torch.nn.Module`` object. ``BaseModel`` objects can be saved
-    as ``torch.package`` easily, making them super easy to port between
+    ``paddle.nn.Layer`` object. ``BaseModel`` objects can be saved
+    as ``package`` easily, making them super easy to port between
     machines without requiring a ton of dependencies. Files can also be
     saved as just weights, in the standard way.
 
@@ -32,7 +32,7 @@ class BaseModel(nn.Module):
     >>>     )
     >>>     model2 = Model.load(f.name)
     >>>     out2 = seed_and_run(model2, x)
-    >>>     assert torch.allclose(out1, out2)
+    >>>     assert paddle.allclose(out1, out2)
     >>>
     >>>     model1.save(f.name, package=True)
     >>>     model2 = Model.load(f.name)
@@ -46,33 +46,18 @@ class BaseModel(nn.Module):
 
     """
 
-    EXTERN = [
-        "audiotools.**",
-        "tqdm",
-        "__main__",
-        "numpy.**",
-        "julius.**",
-        "torchaudio.**",
-        "scipy.**",
-        "einops",
-    ]
-    """Names of libraries that are external to the torch.package saving mechanism.
-    Source code from these libraries will not be packaged into the model. This can
-    be edited by the user of this class by editing ``model.EXTERN``."""
     INTERN = []
-    """Names of libraries that are internal to the torch.package saving mechanism.
-    Source code from these libraries will be saved alongside the model."""
 
     def save(
         self,
         path: str,
         metadata: dict = None,
-        package: bool = True,
+        package: bool = False,
         intern: list = [],
         extern: list = [],
         mock: list = [],
     ):
-        """Saves the model, either as a torch package, or just as
+        """Saves the model, either as a package, or just as
         weights, alongside some specified metadata.
 
         Parameters
@@ -83,16 +68,16 @@ class BaseModel(nn.Module):
             Any metadata to save alongside the model,
             by default None
         package : bool, optional
-            Whether to use ``torch.package`` to save the model in
+            Whether to use ``package`` to save the model in
             a format that is portable, by default True
         intern : list, optional
             List of additional libraries that are internal
-            to the model, used with torch.package, by default []
+            to the model, used with package, by default []
         extern : list, optional
             List of additional libraries that are external to
-            the model, used with torch.package, by default []
+            the model, used with package, by default []
         mock : list, optional
-            List of libraries to mock, used with torch.package,
+            List of libraries to mock, used with package,
             by default []
 
         Returns
@@ -122,7 +107,7 @@ class BaseModel(nn.Module):
 
         if not package:
             state_dict = {"state_dict": self.state_dict(), "metadata": metadata}
-            torch.save(state_dict, path)
+            paddle.save(state_dict, str(path))
         else:
             self._save_package(path, intern=intern, extern=extern, mock=mock)
 
@@ -134,7 +119,7 @@ class BaseModel(nn.Module):
         the first parameter. May not be valid if model is split across
         multiple devices.
         """
-        return list(self.parameters())[0].device
+        return list(self.parameters())[0].place
 
     @classmethod
     def load(
@@ -169,7 +154,7 @@ class BaseModel(nn.Module):
         try:
             model = cls._load_package(location, package_name=package_name)
         except:
-            model_dict = torch.load(location, "cpu")
+            model_dict = paddle.load(location)
             metadata = model_dict["metadata"]
             metadata["kwargs"].update(kwargs)
 
@@ -180,65 +165,23 @@ class BaseModel(nn.Module):
                     metadata["kwargs"].pop(k)
 
             model = cls(*args, **metadata["kwargs"])
-            model.load_state_dict(model_dict["state_dict"], strict=strict)
+            model.set_state_dict(model_dict["state_dict"])
             model.metadata = metadata
 
         return model
 
     def _save_package(self, path, intern=[], extern=[], mock=[], **kwargs):
-        package_name = type(self).__name__
-        resource_name = f"{type(self).__name__}.pth"
-
-        # Below is for loading and re-saving a package.
-        if hasattr(self, "importer"):
-            kwargs["importer"] = (self.importer, torch.package.sys_importer)
-            del self.importer
-
-        # Why do we use a tempfile, you ask?
-        # It's so we can load a packaged model and then re-save
-        # it to the same location. torch.package throws an
-        # error if it's loading and writing to the same
-        # file (this is undocumented).
-        with tempfile.NamedTemporaryFile(suffix=".pth") as f:
-            with torch.package.PackageExporter(f.name, **kwargs) as exp:
-                exp.intern(self.INTERN + intern)
-                exp.mock(mock)
-                exp.extern(self.EXTERN + extern)
-                exp.save_pickle(package_name, resource_name, self)
-
-                if hasattr(self, "metadata"):
-                    exp.save_pickle(
-                        package_name, f"{package_name}.metadata", self.metadata
-                    )
-
-            shutil.copyfile(f.name, path)
-
-        # Must reset the importer back to `self` if it existed
-        # so that you can save the model again!
-        if "importer" in kwargs:
-            self.importer = kwargs["importer"][0]
-        return path
+        raise NotImplementedError("Currently Paddle does not support packaging")
 
     @classmethod
     def _load_package(cls, path, package_name=None):
-        package_name = cls.__name__ if package_name is None else package_name
-        resource_name = f"{package_name}.pth"
-
-        imp = torch.package.PackageImporter(path)
-        model = imp.load_pickle(package_name, resource_name, "cpu")
-        try:
-            model.metadata = imp.load_pickle(package_name, f"{package_name}.metadata")
-        except:  # pragma: no cover
-            pass
-        model.importer = imp
-
-        return model
+        raise NotImplementedError("Currently Paddle does not support packaging")
 
     def save_to_folder(
         self,
         folder: typing.Union[str, Path],
         extra_data: dict = None,
-        package: bool = True,
+        package: bool = False,
     ):
         """Dumps a model into a folder, as both a package
         and as weights, as well as anything specified in
@@ -280,7 +223,7 @@ class BaseModel(nn.Module):
         self.save(weights_path, package=False)
 
         for path, obj in extra_data.items():
-            torch.save(obj, target_base / path)
+            paddle.save(obj, str(target_base / path))
 
         return target_base
 
@@ -288,7 +231,7 @@ class BaseModel(nn.Module):
     def load_from_folder(
         cls,
         folder: typing.Union[str, Path],
-        package: bool = True,
+        package: bool = False,
         strict: bool = False,
         **kwargs,
     ):
@@ -303,7 +246,7 @@ class BaseModel(nn.Module):
         folder : typing.Union[str, Path]
             _description_
         package : bool, optional
-            Whether to use ``torch.package`` to load the model,
+            Whether to use ``package`` to load the model,
             loading the model from ``package.pth``.
         strict : bool, optional
             Ignore unmatched keys, by default False
@@ -318,11 +261,11 @@ class BaseModel(nn.Module):
         model_pth = "package.pth" if package else "weights.pth"
         model_pth = folder / model_pth
 
-        model = cls.load(model_pth, strict=strict)
+        model = cls.load(str(model_pth))
         extra_data = {}
         excluded = ["package.pth", "weights.pth"]
         files = [x for x in folder.glob("*") if x.is_file() and x.name not in excluded]
         for f in files:
-            extra_data[f.name] = torch.load(f, **kwargs)
+            extra_data[f.name] = paddle.load(str(f), **kwargs)
 
         return model, extra_data

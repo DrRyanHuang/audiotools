@@ -1,5 +1,7 @@
+import sys
 from pathlib import Path
 
+sys.path.append("/home/work/pdaudoio")
 from audiotools import AudioSignal
 from audiotools import post
 from audiotools import transforms

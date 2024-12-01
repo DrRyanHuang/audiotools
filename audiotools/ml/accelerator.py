@@ -1,26 +1,54 @@
 import os
 import typing
 
-import torch
-import torch.distributed as dist
-from torch.nn.parallel import DataParallel
-from torch.nn.parallel import DistributedDataParallel
+import paddle
+import paddle.distributed as dist
+from paddle.io import DataLoader
+from paddle.io import DistributedBatchSampler
+from paddle.io import SequenceSampler
 
-from ..data.datasets import ResumableDistributedSampler as DistributedSampler
-from ..data.datasets import ResumableSequentialSampler as SequentialSampler
+
+class ResumableDistributedSampler(DistributedBatchSampler):  # pragma: no cover
+    """Distributed sampler that can be resumed from a given start index."""
+
+    def __init__(self, dataset, start_idx: int = None, **kwargs):
+        super().__init__(dataset, **kwargs)
+        # Start index, allows to resume an experiment at the index it was
+        self.start_idx = start_idx // self.num_replicas if start_idx is not None else 0
+
+    def __iter__(self):
+        for i, idx in enumerate(super().__iter__()):
+            if i >= self.start_idx:
+                yield idx
+        self.start_idx = 0  # set the index back to 0 so for the next epoch
+
+
+class ResumableSequentialSampler(SequenceSampler):  # pragma: no cover
+    """Sequential sampler that can be resumed from a given start index."""
+
+    def __init__(self, dataset, start_idx: int = None, **kwargs):
+        super().__init__(dataset, **kwargs)
+        # Start index, allows to resume an experiment at the index it was
+        self.start_idx = start_idx if start_idx is not None else 0
+
+    def __iter__(self):
+        for i, idx in enumerate(super().__iter__()):
+            if i >= self.start_idx:
+                yield idx
+        self.start_idx = 0  # set the index back to 0 so for the next epoch
 
 
 class Accelerator:  # pragma: no cover
     """This class is used to prepare models and dataloaders for
     usage with DDP or DP. Use the functions prepare_model, prepare_dataloader to
     prepare the respective objects. In the case of models, they are moved to
-    the appropriate GPU and SyncBatchNorm is applied to them. In the case of
+    the appropriate GPU. In the case of
     dataloaders, a sampler is created and the dataloader is initialized with
     that sampler.
 
     If the world size is 1, prepare_model and prepare_dataloader are
-    no-ops. If the environment variable ``LOCAL_RANK`` is not set, then the
-    script was launched without ``torchrun``, and ``DataParallel``
+    no-ops. If the environment variable ``PADDLE_TRAINER_ID`` is not set, then the
+    script was launched without ``paddle.distributed.launch``, and ``DataParallel``
     will be used instead of ``DistributedDataParallel`` (not recommended), if
     the world size (number of GPUs) is greater than 1.
 
@@ -28,26 +56,22 @@ class Accelerator:  # pragma: no cover
     ----------
     amp : bool, optional
         Whether or not to enable automatic mixed precision, by default False
+        (Note: This is a placeholder as PaddlePaddle doesn't have native support for AMP as of now)
     """
 
     def __init__(self, amp: bool = False):
-        local_rank = os.getenv("LOCAL_RANK", None)
-        self.world_size = torch.cuda.device_count()
+        trainer_id = os.getenv("PADDLE_TRAINER_ID", None)
+        self.world_size = paddle.distributed.get_world_size()
 
-        self.use_ddp = self.world_size > 1 and local_rank is not None
-        self.use_dp = self.world_size > 1 and local_rank is None
+        self.use_ddp = self.world_size > 1 and trainer_id is not None
+        self.use_dp = self.world_size > 1 and trainer_id is None
         self.device = "cpu" if self.world_size == 0 else "cuda"
 
         if self.use_ddp:
-            local_rank = int(local_rank)
-            dist.init_process_group(
-                "nccl",
-                init_method="env://",
-                world_size=self.world_size,
-                rank=local_rank,
-            )
+            trainer_id = int(trainer_id)
+            dist.init_parallel_env()
 
-        self.local_rank = 0 if local_rank is None else local_rank
+        self.local_rank = 0 if trainer_id is None else int(trainer_id)
         self.amp = amp
 
         class DummyScaler:
@@ -66,75 +90,61 @@ class Accelerator:  # pragma: no cover
             def update(self):
                 pass
 
-        self.scaler = torch.cuda.amp.GradScaler() if amp else DummyScaler()
-        self.device_ctx = (
-            torch.cuda.device(self.local_rank) if torch.cuda.is_available() else None
-        )
+        self.scaler = paddle.amp.GradScaler() if self.amp else DummyScaler()
 
     def __enter__(self):
-        if self.device_ctx is not None:
-            self.device_ctx.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self.device_ctx is not None:
-            self.device_ctx.__exit__(exc_type, exc_value, traceback)
+        pass
 
-    def prepare_model(self, model: torch.nn.Module, **kwargs):
+    def prepare_model(self, model: paddle.nn.Layer, **kwargs):
         """Prepares model for DDP or DP. The model is moved to
         the device of the correct rank.
 
         Parameters
         ----------
-        model : torch.nn.Module
+        model : paddle.nn.Layer
             Model that is converted for DDP or DP.
 
         Returns
         -------
-        torch.nn.Module
+        paddle.nn.Layer
             Wrapped model, or original model if DDP and DP are turned off.
         """
-        model = model.to(self.device)
         if self.use_ddp:
-            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-            model = DistributedDataParallel(
-                model, device_ids=[self.local_rank], **kwargs
-            )
+            model = paddle.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+            model = paddle.DataParallel(model, **kwargs)
         elif self.use_dp:
-            model = DataParallel(model, **kwargs)
+            model = paddle.DataParallel(model, **kwargs)
         return model
 
-    # Automatic mixed-precision utilities
     def autocast(self, *args, **kwargs):
-        """Context manager for autocasting. Arguments
-        go to ``torch.cuda.amp.autocast``.
-        """
-        return torch.cuda.amp.autocast(self.amp, *args, **kwargs)
+        return paddle.amp.auto_cast(self.amp, *args, **kwargs)
 
-    def backward(self, loss: torch.Tensor):
-        """Backwards pass, after scaling the loss if ``amp`` is
-        enabled.
+    def backward(self, loss: paddle.Tensor):
+        """Backwards pass.
 
         Parameters
         ----------
-        loss : torch.Tensor
+        loss : paddle.Tensor
             Loss value.
         """
-        self.scaler.scale(loss).backward()
+        scaled = self.scaler.scale(loss)  # scale the loss
+        scaled.backward()
 
-    def step(self, optimizer: torch.optim.Optimizer):
-        """Steps the optimizer, using a ``scaler`` if ``amp`` is
-        enabled.
+    def step(self, optimizer: paddle.optimizer.Optimizer):
+        """Steps the optimizer.
 
         Parameters
         ----------
-        optimizer : torch.optim.Optimizer
+        optimizer : paddle.optimizer.Optimizer
             Optimizer to step forward.
         """
         self.scaler.step(optimizer)
 
     def update(self):
-        """Updates the scale factor."""
+        # https://www.paddlepaddle.org.cn/documentation/docs/zh/2.6/api/paddle/amp/GradScaler_cn.html#step-optimizer
         self.scaler.update()
 
     def prepare_dataloader(
@@ -153,32 +163,33 @@ class Accelerator:  # pragma: no cover
 
         Returns
         -------
-        _type_
-            _description_
+        DataLoader
+            Wrapped DataLoader.
         """
 
         if self.use_ddp:
-            sampler = DistributedSampler(
+            sampler = ResumableDistributedSampler(
                 dataset,
                 start_idx,
+                batch_size=kwargs.get("batch_size", 1),
+                shuffle=kwargs.get("shuffle", True),
+                drop_last=kwargs.get("drop_last", False),
                 num_replicas=self.world_size,
                 rank=self.local_rank,
             )
             if "num_workers" in kwargs:
                 kwargs["num_workers"] = max(kwargs["num_workers"] // self.world_size, 1)
-            kwargs["batch_size"] = max(kwargs["batch_size"] // self.world_size, 1)
         else:
-            sampler = SequentialSampler(dataset, start_idx)
+            sampler = ResumableSequentialSampler(dataset, start_idx)
 
-        dataloader = torch.utils.data.DataLoader(dataset, sampler=sampler, **kwargs)
+        dataloader = DataLoader(
+            dataset,
+            batch_sampler=sampler if self.use_ddp else None,
+            sampler=sampler if not self.use_ddp else None,
+            **kwargs,
+        )
         return dataloader
 
     @staticmethod
     def unwrap(model):
-        """Unwraps the model if it was wrapped in DDP or DP, otherwise
-        just returns the model. Use this to unwrap the model returned by
-        :py:func:`audiotools.ml.accelerator.Accelerator.prepare_model`.
-        """
-        if hasattr(model, "module"):
-            return model.module
         return model
